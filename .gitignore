@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+env/
+*.egg
+
+# Environment secrets — never commit
+.env
+*.env.local
+
+# Docker
+.docker/
+*.log
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# JetBrains IDEs (PyCharm, IntelliJ, etc.)
+.idea/
+*.iml
+*.iws
+out/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Kubernetes generated / secrets
+infra/k8s/**/secrets.yaml
+infra/k8s/**/*.secret.yaml
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml

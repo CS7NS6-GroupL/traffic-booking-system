@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traffic-config
+  namespace: us
+data:
+  REGION: "us"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  REDIS_URL: "redis://redis:6379"
+  MONGO_URI: "mongodb+srv://<user>:<pass>@cluster.mongodb.net/traffic?retryWrites=true"
+  JWT_ALGORITHM: "HS256"
+  JOURNEY_MANAGEMENT_URL: "http://journey-management:8000"
+  US_ROUTE_URL: "http://route-service:8000"
+  EU_ROUTE_URL: "http://data-gateway-eu:8000"
+  ASIA_ROUTE_URL: "http://data-gateway-asia:8000"
+  LOCAL_ROUTE_URL: "http://route-service:8000"

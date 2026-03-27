@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Traffic Booking System — CS7NS6 Group L</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    body { background: #0d1117; color: #e6edf3; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    .navbar { background: #161b22 !important; border-bottom: 1px solid #30363d; }
+    .card { background: #161b22; border: 1px solid #30363d; color: #e6edf3; }
+    .card-header { background: #1c2128; border-bottom: 1px solid #30363d; font-size: 0.85rem; font-weight: 600; color: #8b949e; letter-spacing: 0.03em; text-transform: uppercase; }
+    .form-control, .form-select { background: #0d1117; border-color: #30363d; color: #e6edf3; }
+    .form-control:focus, .form-select:focus { background: #0d1117; border-color: #388bfd; color: #e6edf3; box-shadow: 0 0 0 0.2rem rgba(56,139,253,.2); }
+    .form-control::placeholder { color: #484f58; }
+    .form-label { color: #8b949e; font-size: 0.8rem; margin-bottom: 4px; }
+    .btn-primary { background: #238636; border-color: #238636; }
+    .btn-primary:hover { background: #2ea043; border-color: #2ea043; }
+    .btn-outline-danger { border-color: #da3633; color: #f85149; }
+    .btn-outline-danger:hover { background: #da3633; color: #fff; }
+    .nav-tabs { border-bottom: 1px solid #30363d; }
+    .nav-tabs .nav-link { color: #8b949e; border: none; padding: 10px 16px; font-size: 0.85rem; }
+    .nav-tabs .nav-link:hover { color: #e6edf3; border: none; background: none; }
+    .nav-tabs .nav-link.active { color: #e6edf3; border: none; border-bottom: 2px solid #388bfd; background: none; font-weight: 600; }
+    .tab-content { padding-top: 20px; }
+    .tag { display: inline-block; padding: 1px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; white-space: nowrap; }
+    .tag-approved { background: #1a3b2a; color: #3fb950; border: 1px solid #2ea043; }
+    .tag-pending   { background: #1a2b3b; color: #388bfd; border: 1px solid #1f6feb; }
+    .tag-cancelled { background: #2d2d2d; color: #8b949e; border: 1px solid #484f58; }
+    .tag-rejected  { background: #3b1a1a; color: #f85149; border: 1px solid #da3633; }
+    .tag-COMMITTED { background: #1a3b2a; color: #3fb950; border: 1px solid #2ea043; }
+    .tag-PENDING   { background: #1a2b3b; color: #d29922; border: 1px solid #9e6a03; }
+    .tag-ABORTED   { background: #3b1a1a; color: #f85149; border: 1px solid #da3633; }
+    .badge-eu   { background: #1f6feb !important; font-size: 0.65rem; }
+    .badge-us   { background: #388bfd !important; font-size: 0.65rem; }
+    .badge-asia { background: #8957e5 !important; font-size: 0.65rem; }
+    .badge-local { background: #484f58 !important; font-size: 0.65rem; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+    .dot-up      { background: #3fb950; }
+    .dot-down    { background: #f85149; }
+    .dot-checking { background: #d29922; animation: pulse 1s infinite; }
+    .dot-connected { background: #3fb950; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .notif-feed { max-height: 260px; overflow-y: auto; }
+    .notif-item { padding: 10px 12px; border-radius: 6px; margin-bottom: 6px; font-size: 0.82rem; }
+    .notif-approved { background: #1a3b2a; border-left: 3px solid #3fb950; }
+    .notif-rejected { background: #3b1a1a; border-left: 3px solid #f85149; }
+    .table { color: #e6edf3; }
+    .table-hover tbody tr:hover { background: #1c2128 !important; }
+    .table th { color: #8b949e; border-color: #30363d; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+    .table td { border-color: #30363d; vertical-align: middle; font-size: 0.83rem; }
+    .result-card { border-radius: 6px; padding: 14px; font-size: 0.83rem; }
+    .result-ok  { background: #1a3b2a; border: 1px solid #2ea043; }
+    .result-err { background: #3b1a1a; border: 1px solid #da3633; }
+    .mono { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 0.8rem; }
+    .token-preview { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 6px 10px; font-size: 0.72rem; font-family: monospace; color: #8b949e; word-break: break-all; max-height: 50px; overflow: hidden; }
+    .saga-poll { background: #1c2128; border: 1px solid #30363d; border-radius: 4px; padding: 8px 12px; margin-top: 8px; font-size: 0.78rem; }
+    .health-card { transition: border-color .2s; }
+    .health-card.up   { border-color: #2ea043 !important; }
+    .health-card.down { border-color: #da3633 !important; }
+    .section-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: #8b949e; margin-bottom: 12px; font-weight: 600; }
+  </style>
+</head>
+<body>
+
+<!-- Navbar -->
+<nav class="navbar navbar-dark px-4 py-2">
+  <div class="d-flex align-items-center gap-3 w-100">
+    <span class="navbar-brand mb-0 me-auto" style="font-weight:700;font-size:1rem">
+      <i class="bi bi-car-front-fill me-2" style="color:#388bfd"></i>Traffic Booking
+      <small class="text-muted ms-2" style="font-size:0.65rem;font-weight:400;letter-spacing:.05em">CS7NS6 GROUP L</small>
+    </span>
+    <div id="ws-badge" class="d-none d-flex align-items-center gap-2" style="font-size:0.75rem;color:#8b949e">
+      <span class="dot dot-checking" id="ws-dot"></span>
+      <span id="ws-label">ws</span>
+    </div>
+    <div id="user-bar" class="d-none d-flex align-items-center gap-2">
+      <span class="badge" id="role-badge" style="font-size:0.7rem"></span>
+      <span style="font-size:0.82rem;color:#8b949e" id="user-label"></span>
+      <button class="btn btn-sm" style="color:#8b949e;background:none;border:1px solid #30363d;padding:1px 10px;font-size:0.75rem" onclick="logout()">Logout</button>
+    </div>
+  </div>
+</nav>
+
+<div class="container-fluid px-4 pb-5">
+
+  <!-- Tabs -->
+  <ul class="nav nav-tabs mt-3" id="tabs">
+    <li class="nav-item"><a class="nav-link active" href="#" onclick="showTab('driver');return false" id="btn-driver"><i class="bi bi-person-fill me-1"></i>Driver</a></li>
+    <li class="nav-item"><a class="nav-link" href="#" onclick="showTab('authority');return false" id="btn-authority"><i class="bi bi-shield-fill me-1"></i>Authority</a></li>
+    <li class="nav-item"><a class="nav-link" href="#" onclick="showTab('health');return false" id="btn-health"><i class="bi bi-activity me-1"></i>System Health</a></li>
+  </ul>
+
+  <div class="tab-content">
+
+    <!-- ════════════════════════════════ DRIVER TAB ═══════════════════════════ -->
+    <div id="tab-driver">
+
+      <!-- Auth forms (shown when logged out) -->
+      <div id="auth-forms">
+        <div class="row g-3" style="max-width:780px">
+          <div class="col-md-6">
+            <div class="card">
+              <div class="card-header"><i class="bi bi-person-plus me-1"></i>Register</div>
+              <div class="card-body">
+                <div class="mb-2"><label class="form-label">Username</label><input class="form-control" id="reg-user" placeholder="alice"></div>
+                <div class="mb-2"><label class="form-label">Password</label><input type="password" class="form-control" id="reg-pass" placeholder="••••••••"></div>
+                <div class="mb-2"><label class="form-label">Vehicle ID</label><input class="form-control" id="reg-veh" placeholder="veh-001"></div>
+                <div class="mb-3">
+                  <label class="form-label">Role</label>
+                  <select class="form-select" id="reg-role">
+                    <option value="DRIVER">DRIVER</option>
+                    <option value="AUTHORITY">AUTHORITY</option>
+                  </select>
+                </div>
+                <button class="btn btn-primary w-100" onclick="register()"><i class="bi bi-person-plus me-1"></i>Register</button>
+                <div id="reg-msg" class="mt-2"></div>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card">
+              <div class="card-header"><i class="bi bi-box-arrow-in-right me-1"></i>Login</div>
+              <div class="card-body">
+                <div class="mb-2"><label class="form-label">Username</label><input class="form-control" id="login-user" placeholder="alice"></div>
+                <div class="mb-3"><label class="form-label">Password</label><input type="password" class="form-control" id="login-pass" placeholder="••••••••" onkeydown="if(event.key==='Enter')login()"></div>
+                <button class="btn btn-primary w-100 mb-3" onclick="login()"><i class="bi bi-box-arrow-in-right me-1"></i>Login</button>
+                <div id="login-msg"></div>
+                <div id="token-row" class="d-none mt-2">
+                  <div class="form-label">JWT</div>
+                  <div class="token-preview" id="token-preview"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Driver dashboard (shown after login) -->
+      <div id="driver-dash" class="d-none">
+        <div class="row g-3">
+
+          <!-- Book a journey -->
+          <div class="col-lg-5">
+            <div class="card">
+              <div class="card-header"><i class="bi bi-map-fill me-1"></i>Book a Journey</div>
+              <div class="card-body">
+                <div class="mb-2">
+                  <label class="form-label">Route</label>
+                  <select class="form-select" id="route-select">
+                    <optgroup label="Single-region (EU)">
+                      <option value="A|D">A → D &nbsp; EU only · ~40 km</option>
+                      <option value="B|C">B → C &nbsp; EU only · short</option>
+                      <option value="A|C">A → C &nbsp; EU only · direct</option>
+                    </optgroup>
+                    <optgroup label="Cross-region ✈">
+                      <option value="A|Z">A → Z &nbsp; EU → US</option>
+                      <option value="A|R">A → R &nbsp; EU → US → Asia</option>
+                      <option value="X|R">X → R &nbsp; US → Asia</option>
+                    </optgroup>
+                    <optgroup label="Single-region (Asia)">
+                      <option value="P|R">P → R &nbsp; Asia only</option>
+                    </optgroup>
+                  </select>
+                </div>
+                <div class="mb-3">
+                  <label class="form-label">Departure (UTC)</label>
+                  <input type="datetime-local" class="form-control" id="depart-time">
+                </div>
+                <button class="btn btn-primary w-100" onclick="createBooking()">
+                  <i class="bi bi-send-fill me-1"></i>Submit Booking
+                </button>
+                <div id="booking-result" class="mt-3"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Live notifications -->
+          <div class="col-lg-7">
+            <div class="card" style="height:100%">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-bell-fill me-1"></i>Live Notifications</span>
+                <div class="d-flex align-items-center gap-2" style="font-size:0.75rem;color:#8b949e">
+                  <span class="dot dot-checking" id="ws-dot-panel"></span>
+                  <span id="ws-label-panel">not connected</span>
+                </div>
+              </div>
+              <div class="card-body">
+                <div id="notif-feed" class="notif-feed">
+                  <div id="notif-placeholder" style="color:#484f58;font-size:0.83rem;text-align:center;padding:30px 0">
+                    Booking outcomes arrive here via WebSocket after you submit a booking
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- My bookings -->
+          <div class="col-12">
+            <div class="card">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-journal-check me-1"></i>My Bookings</span>
+                <button class="btn btn-sm" style="color:#388bfd;background:none;border:1px solid #388bfd;padding:1px 10px;font-size:0.75rem" onclick="listJourneys()">
+                  <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                </button>
+              </div>
+              <div class="card-body p-0">
+                <div class="table-responsive">
+                  <table class="table table-hover mb-0">
+                    <thead><tr>
+                      <th>Booking ID</th><th>Route</th><th>Regions</th>
+                      <th>Departure</th><th>Status</th><th></th>
+                    </tr></thead>
+                    <tbody id="journeys-tbody">
+                      <tr><td colspan="6" class="text-center py-4" style="color:#484f58">No bookings yet</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div><!-- /tab-driver -->
+
+    <!-- ════════════════════════════ AUTHORITY TAB ═══════════════════════════ -->
+    <div id="tab-authority" class="d-none">
+      <div id="auth-gate" class="text-center py-5" style="color:#8b949e">
+        <i class="bi bi-shield-lock" style="font-size:3rem;color:#30363d;display:block;margin-bottom:12px"></i>
+        Log in as <strong style="color:#8957e5">AUTHORITY</strong> on the Driver tab to access this panel
+      </div>
+      <div id="authority-panel" class="d-none">
+        <div class="row g-3">
+
+          <!-- Vehicle lookup -->
+          <div class="col-md-6">
+            <div class="card">
+              <div class="card-header"><i class="bi bi-search me-1"></i>Vehicle Lookup</div>
+              <div class="card-body">
+                <div class="d-flex gap-2 mb-3">
+                  <input class="form-control" id="veh-input" placeholder="veh-001">
+                  <button class="btn btn-primary" onclick="lookupVehicle()">Search</button>
+                </div>
+                <div id="veh-result"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Flag a booking -->
+          <div class="col-md-6">
+            <div class="card">
+              <div class="card-header"><i class="bi bi-flag-fill me-1"></i>Flag a Booking</div>
+              <div class="card-body">
+                <div class="mb-2"><label class="form-label">Booking ID</label><input class="form-control mono" id="flag-id" placeholder="bk-a1b2c3d4"></div>
+                <div class="mb-3"><label class="form-label">Reason</label><textarea class="form-control" id="flag-reason" rows="2" placeholder="Suspicious activity…"></textarea></div>
+                <button class="btn btn-outline-danger w-100" onclick="flagBooking()"><i class="bi bi-flag-fill me-1"></i>Flag Booking</button>
+                <div id="flag-msg" class="mt-2"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Audit log -->
+          <div class="col-12">
+            <div class="card">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-list-ul me-1"></i>Audit Log</span>
+                <button class="btn btn-sm" style="color:#388bfd;background:none;border:1px solid #388bfd;padding:1px 10px;font-size:0.75rem" onclick="loadAudit()">
+                  <i class="bi bi-arrow-clockwise me-1"></i>Load
+                </button>
+              </div>
+              <div class="card-body p-0">
+                <div class="table-responsive">
+                  <table class="table table-hover mb-0">
+                    <thead><tr>
+                      <th>Booking ID</th><th>Driver</th><th>Vehicle</th>
+                      <th>Route</th><th>Regions</th><th>Status</th><th>Created</th>
+                    </tr></thead>
+                    <tbody id="audit-tbody">
+                      <tr><td colspan="7" class="text-center py-4" style="color:#484f58">Click Load to fetch audit log</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div><!-- /tab-authority -->
+
+    <!-- ══════════════════════════ SYSTEM HEALTH TAB ═════════════════════════ -->
+    <div id="tab-health" class="d-none">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <span class="section-title mb-0">8 application services — pinging /health</span>
+        <button class="btn btn-sm" style="color:#388bfd;background:none;border:1px solid #388bfd;padding:2px 14px;font-size:0.75rem" onclick="checkHealth()">
+          <i class="bi bi-arrow-clockwise me-1"></i>Refresh All
+        </button>
+      </div>
+      <div class="row g-3" id="health-grid"></div>
+    </div>
+
+  </div><!-- /tab-content -->
+</div><!-- /container -->
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let token = null, username = null, role = null, vehicleId = null, ws = null;
+
+// ── API helper ────────────────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+      ...(opts.headers || {}),
+    },
+    ...opts,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw { status: res.status, detail: data.detail || `HTTP ${res.status}` };
+  return data;
+}
+
+// ── Small UI helpers ──────────────────────────────────────────────────────────
+function tag(s) {
+  const cls = { approved:'tag-approved', pending:'tag-pending', cancelled:'tag-cancelled',
+                rejected:'tag-rejected', COMMITTED:'tag-COMMITTED', PENDING:'tag-PENDING', ABORTED:'tag-ABORTED' };
+  return `<span class="tag ${cls[s] || 'tag-pending'}">${s}</span>`;
+}
+function regionBadges(arr) {
+  if (!arr || !arr.length) return '';
+  return arr.map(r => `<span class="badge badge-${r} me-1">${r.toUpperCase()}</span>`).join('');
+}
+function msg(id, html, err = false) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = err
+    ? `<div style="color:#f85149;font-size:0.8rem;margin-top:4px"><i class="bi bi-exclamation-circle me-1"></i>${html}</div>`
+    : `<div style="color:#3fb950;font-size:0.8rem;margin-top:4px"><i class="bi bi-check-circle me-1"></i>${html}</div>`;
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function showTab(name) {
+  ['driver','authority','health'].forEach(t => {
+    document.getElementById(`tab-${t}`).classList.add('d-none');
+    document.getElementById(`btn-${t}`).classList.remove('active');
+  });
+  document.getElementById(`tab-${name}`).classList.remove('d-none');
+  document.getElementById(`btn-${name}`).classList.add('active');
+  if (name === 'health') checkHealth();
+  if (name === 'authority') refreshAuthorityGate();
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+async function register() {
+  try {
+    const d = await api('/api/auth/register', { method:'POST', body: JSON.stringify({
+      username: document.getElementById('reg-user').value,
+      password: document.getElementById('reg-pass').value,
+      vehicle_id: document.getElementById('reg-veh').value,
+      role: document.getElementById('reg-role').value,
+    })});
+    msg('reg-msg', `Registered as <strong>${d.username}</strong> — you can now log in`);
+  } catch(e) { msg('reg-msg', e.detail, true); }
+}
+
+async function login() {
+  document.getElementById('login-msg').innerHTML = '';
+  try {
+    const d = await api('/api/auth/login', { method:'POST', body: JSON.stringify({
+      username: document.getElementById('login-user').value,
+      password: document.getElementById('login-pass').value,
+    })});
+    token = d.access_token;
+    role  = d.role;
+    username = document.getElementById('login-user').value;
+    // Decode JWT payload to get vehicle_id (no library needed — just base64)
+    try { vehicleId = JSON.parse(atob(token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))).vehicle_id; } catch {}
+    onLoggedIn();
+  } catch(e) { msg('login-msg', e.detail || 'Login failed', true); }
+}
+
+function onLoggedIn() {
+  // Navbar
+  document.getElementById('user-bar').classList.remove('d-none');
+  const rb = document.getElementById('role-badge');
+  rb.textContent = role;
+  rb.style.background = role === 'AUTHORITY' ? '#8957e5' : '#1f6feb';
+  document.getElementById('user-label').textContent = username + (vehicleId ? ` · ${vehicleId}` : '');
+  // Token preview
+  document.getElementById('token-row').classList.remove('d-none');
+  document.getElementById('token-preview').textContent = token.substring(0, 90) + '…';
+  // Show dashboard, hide auth forms
+  document.getElementById('auth-forms').classList.add('d-none');
+  document.getElementById('driver-dash').classList.remove('d-none');
+  // Default departure time: tomorrow 09:00
+  const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9,0,0,0);
+  document.getElementById('depart-time').value = d.toISOString().slice(0,16);
+  // Connect WebSocket for DRIVER
+  if (role === 'DRIVER') connectWS();
+  refreshAuthorityGate();
+  listJourneys();
+}
+
+function logout() {
+  token = username = role = vehicleId = null;
+  if (ws) { ws.close(); ws = null; }
+  document.getElementById('user-bar').classList.add('d-none');
+  document.getElementById('ws-badge').classList.add('d-none');
+  document.getElementById('auth-forms').classList.remove('d-none');
+  document.getElementById('driver-dash').classList.add('d-none');
+  document.getElementById('token-row').classList.add('d-none');
+  document.getElementById('login-msg').innerHTML = '';
+  refreshAuthorityGate();
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connectWS() {
+  if (ws) ws.close();
+  document.getElementById('ws-badge').classList.remove('d-none');
+  setWs('checking', 'connecting…');
+  ws = new WebSocket(`ws://${location.host}/ws/${username}`);
+  ws.onopen  = () => setWs('connected', 'connected');
+  ws.onclose = () => setWs('down', 'disconnected');
+  ws.onerror = () => setWs('down', 'error');
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    pushNotification(m);
+    if (m.outcome) setTimeout(listJourneys, 500);
+  };
+}
+
+function setWs(state, label) {
+  ['ws-dot','ws-dot-panel'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.className = `dot dot-${state}`;
+  });
+  ['ws-label','ws-label-panel'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el && label) el.textContent = label;
+  });
+}
+
+function pushNotification(m) {
+  const feed = document.getElementById('notif-feed');
+  const ph = document.getElementById('notif-placeholder');
+  if (ph) ph.remove();
+  const ok = m.outcome === 'APPROVED';
+  const div = document.createElement('div');
+  div.className = `notif-item notif-${ok ? 'approved' : 'rejected'}`;
+  const regions = m.regions_involved || (m.regional_outcomes ? Object.keys(m.regional_outcomes) : []);
+  div.innerHTML = `
+    <div class="d-flex justify-content-between align-items-start">
+      <strong style="color:${ok ? '#3fb950' : '#f85149'}">${ok ? '✓ APPROVED' : '✗ REJECTED'}</strong>
+      <small style="color:#484f58">${new Date().toLocaleTimeString()}</small>
+    </div>
+    <div class="mono" style="color:#8b949e;margin-top:2px">${m.booking_id || ''}</div>
+    ${regions.length ? `<div class="mt-1">${regionBadges(regions)}</div>` : ''}
+    ${m.reason ? `<div style="color:#8b949e;font-size:0.75rem;margin-top:3px">${m.reason}</div>` : ''}
+  `;
+  feed.insertBefore(div, feed.firstChild);
+  while (feed.children.length > 12) feed.removeChild(feed.lastChild);
+}
+
+// ── Booking ───────────────────────────────────────────────────────────────────
+async function createBooking() {
+  const [origin, destination] = document.getElementById('route-select').value.split('|');
+  const departure_time = document.getElementById('depart-time').value + ':00Z';
+  const resultDiv = document.getElementById('booking-result');
+  resultDiv.innerHTML = `<div style="color:#8b949e;font-size:0.83rem"><span class="dot dot-checking me-2"></span>Submitting…</div>`;
+
+  try {
+    const d = await api('/api/bookings', { method:'POST', body: JSON.stringify({
+      driver_id: username, vehicle_id: vehicleId || 'veh-001',
+      origin, destination, departure_time,
+    })});
+    const isCross = d.flow === 'cross-region-saga';
+    resultDiv.innerHTML = `
+      <div class="result-card result-ok">
+        <div class="d-flex justify-content-between align-items-start mb-2">
+          <strong style="color:#3fb950"><i class="bi bi-check-circle-fill me-1"></i>Accepted</strong>
+          <span class="tag ${isCross ? 'tag-PENDING' : 'tag-approved'}">${isCross ? '✈ cross-region saga' : 'single-region'}</span>
+        </div>
+        <div class="mono" style="color:#8b949e">booking_id: <span style="color:#e6edf3">${d.booking_id}</span></div>
+        ${d.saga_id ? `<div class="mono" style="color:#8b949e">saga_id: <span style="color:#e6edf3">${d.saga_id}</span></div>` : ''}
+        ${isCross ? `<div class="mt-2">${regionBadges(d.regions_involved)}</div>` : ''}
+        ${isCross ? `<div id="saga-poll-${d.saga_id}" class="saga-poll mt-2" style="color:#484f58">Polling saga state…</div>` : ''}
+        <div style="color:#484f58;font-size:0.75rem;margin-top:6px">Outcome arrives via WebSocket ↗</div>
+      </div>`;
+    if (isCross && d.saga_id) pollSaga(d.saga_id, 0);
+    setTimeout(listJourneys, 2000);
+  } catch(e) {
+    resultDiv.innerHTML = `<div class="result-card result-err"><i class="bi bi-exclamation-triangle me-1" style="color:#f85149"></i>${e.detail || e.message || 'Unknown error'}</div>`;
+  }
+}
+
+async function pollSaga(sagaId, attempts) {
+  if (attempts > 15) return; // stop after ~30s
+  try {
+    const s = await api(`/api/sagas/${sagaId}`);
+    const el = document.getElementById(`saga-poll-${sagaId}`);
+    if (!el) return;
+    const statusColor = { COMMITTED:'#3fb950', ABORTED:'#f85149', PENDING:'#d29922', ABORTING:'#d29922' };
+    const regionRows = Object.entries(s.regional_outcomes || {}).map(([r, o]) =>
+      `<span style="margin-right:10px;font-size:0.75rem">${r}: <strong style="color:${o.outcome==='APPROVED'?'#3fb950':'#f85149'}">${o.outcome}</strong></span>`
+    ).join('');
+    el.innerHTML = `Saga: <strong style="color:${statusColor[s.status]||'#d29922'}">${s.status}</strong> ${regionRows}`;
+    if (s.status === 'PENDING' || s.status === 'ABORTING') {
+      setTimeout(() => pollSaga(sagaId, attempts + 1), 2000);
+    }
+  } catch {}
+}
+
+async function listJourneys() {
+  if (!token) return;
+  try {
+    const d = await api('/api/journeys');
+    const tbody = document.getElementById('journeys-tbody');
+    const bookings = d.bookings || [];
+    if (!bookings.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="text-center py-4" style="color:#484f58">No bookings yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = bookings.map(b => `
+      <tr>
+        <td class="mono">${b.booking_id}</td>
+        <td>${b.origin} → ${b.destination}</td>
+        <td>${regionBadges(b.regions_involved || (b.region ? [b.region] : ['local']))}</td>
+        <td style="color:#8b949e">${(b.departure_time || '').replace('T',' ').substring(0,16)}</td>
+        <td>${tag(b.status)}</td>
+        <td>${b.status !== 'cancelled'
+          ? `<button class="btn btn-sm btn-outline-danger" style="padding:1px 8px;font-size:0.75rem" onclick="cancelJourney('${b.booking_id}')">Cancel</button>`
+          : ''}</td>
+      </tr>`).join('');
+  } catch(e) { console.error('listJourneys', e); }
+}
+
+async function cancelJourney(id) {
+  if (!confirm(`Cancel booking ${id}?`)) return;
+  try {
+    await api(`/api/journeys/${id}`, { method:'DELETE' });
+    listJourneys();
+  } catch(e) { alert(e.detail || 'Cancel failed'); }
+}
+
+// ── Authority ─────────────────────────────────────────────────────────────────
+function refreshAuthorityGate() {
+  const show = role === 'AUTHORITY';
+  document.getElementById('auth-gate').classList.toggle('d-none', show);
+  document.getElementById('authority-panel').classList.toggle('d-none', !show);
+}
+
+async function lookupVehicle() {
+  const vid = document.getElementById('veh-input').value.trim();
+  if (!vid) return;
+  const out = document.getElementById('veh-result');
+  out.innerHTML = '<div style="color:#8b949e;font-size:0.83rem">Searching…</div>';
+  try {
+    const d = await api(`/api/authority/bookings/${vid}`);
+    const bookings = d.bookings || [];
+    if (!bookings.length) { out.innerHTML = `<div style="color:#8b949e;font-size:0.83rem">No bookings for ${vid}</div>`; return; }
+    out.innerHTML = bookings.map(b => `
+      <div class="d-flex justify-content-between align-items-center p-2 mb-1 rounded" style="background:#1c2128;border:1px solid #30363d;font-size:0.8rem">
+        <span class="mono">${b.booking_id}</span>
+        <span>${b.origin} → ${b.destination}</span>
+        ${tag(b.status)}
+      </div>`).join('');
+  } catch(e) { out.innerHTML = `<div style="color:#f85149;font-size:0.8rem">${e.detail}</div>`; }
+}
+
+async function loadAudit() {
+  try {
+    const d = await api('/api/authority/audit');
+    const records = d.audit_records || [];
+    const tbody = document.getElementById('audit-tbody');
+    if (!records.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4" style="color:#484f58">No records</td></tr>';
+      return;
+    }
+    tbody.innerHTML = records.map(b => `
+      <tr>
+        <td class="mono" style="font-size:0.75rem">${b.booking_id}</td>
+        <td>${b.driver_id || '—'}</td>
+        <td>${b.vehicle_id || '—'}</td>
+        <td>${(b.origin||'?')} → ${(b.destination||'?')}</td>
+        <td>${regionBadges(b.regions_involved || (b.region ? [b.region] : []))}</td>
+        <td>${tag(b.status)}</td>
+        <td style="color:#8b949e;font-size:0.75rem">${(b.created_at||'').substring(0,19).replace('T',' ')}</td>
+      </tr>`).join('');
+  } catch(e) { alert(e.detail || 'Failed to load audit'); }
+}
+
+async function flagBooking() {
+  const id = document.getElementById('flag-id').value.trim();
+  const reason = document.getElementById('flag-reason').value;
+  if (!id) return;
+  try {
+    const d = await api(`/api/authority/flag/${id}`, { method:'POST', body: JSON.stringify({ reason }) });
+    msg('flag-msg', `Booking <strong>${id}</strong> flagged`);
+  } catch(e) { msg('flag-msg', e.detail, true); }
+}
+
+// ── Health ────────────────────────────────────────────────────────────────────
+const SERVICES = [
+  { name:'Booking Service',      path:'/api/health/booking',      desc:'Entry point — JWT + Kafka producer' },
+  { name:'User Registry',        path:'/api/health/user',         desc:'Register, login, bcrypt, JWT' },
+  { name:'Authority Service',    path:'/api/health/authority',    desc:'AUTHORITY-only audit & enforcement' },
+  { name:'Data Gateway',         path:'/api/health/gateway',      desc:'Cross-region HTTP + Atlas fallback' },
+  { name:'Validation Service',   path:'/api/health/validation',   desc:'Kafka consumer, Redis locks, capacity' },
+  { name:'Route Service',        path:'/api/health/route',        desc:'NetworkX regional graph, Dijkstra' },
+  { name:'Notification Service', path:'/api/health/notification', desc:'WebSocket push, Kafka consumer' },
+  { name:'Journey Management',   path:'/api/health/journey',      desc:'Overlay planner + saga coordinator' },
+];
+
+async function checkHealth() {
+  const grid = document.getElementById('health-grid');
+  grid.innerHTML = SERVICES.map((s, i) => `
+    <div class="col-xl-3 col-md-4 col-sm-6">
+      <div class="card health-card" id="hcard-${i}">
+        <div class="card-body py-3">
+          <div class="d-flex align-items-center gap-2 mb-1">
+            <span class="dot dot-checking" id="hdot-${i}"></span>
+            <strong style="font-size:0.85rem">${s.name}</strong>
+          </div>
+          <div style="font-size:0.72rem;color:#8b949e;margin-bottom:6px">${s.desc}</div>
+          <div id="hinfo-${i}" style="font-size:0.72rem;color:#484f58">checking…</div>
+        </div>
+      </div>
+    </div>`).join('');
+
+  await Promise.all(SERVICES.map(async (s, i) => {
+    const t0 = Date.now();
+    try {
+      const d = await fetch(s.path).then(r => r.json());
+      const ms = Date.now() - t0;
+      document.getElementById(`hdot-${i}`).className = 'dot dot-up';
+      document.getElementById(`hcard-${i}`).classList.add('up');
+      document.getElementById(`hinfo-${i}`).innerHTML =
+        `<span style="color:#3fb950">online</span> <span style="color:#484f58">${ms}ms</span>` +
+        (d.region ? ` · <span style="color:#8b949e">${d.region}</span>` : '');
+    } catch {
+      document.getElementById(`hdot-${i}`).className = 'dot dot-down';
+      document.getElementById(`hcard-${i}`).classList.add('down');
+      document.getElementById(`hinfo-${i}`).innerHTML = '<span style="color:#f85149">offline</span>';
+    }
+  }));
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+showTab('driver');
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

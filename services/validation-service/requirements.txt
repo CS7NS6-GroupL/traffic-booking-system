@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+httpx
+kafka-python
+redis
+pymongo

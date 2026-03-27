@@ -1,0 +1,31 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis-primary
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-primary-data:/data
+    networks:
+      - traffic-net
+
+  redis-replica:
+    image: redis:7-alpine
+    container_name: redis-replica
+    command: redis-server --replicaof redis 6379 --save 60 1 --loglevel warning
+    ports:
+      - "6380:6379"
+    depends_on:
+      - redis
+    networks:
+      - traffic-net
+
+volumes:
+  redis-primary-data:
+
+networks:
+  traffic-net:
+    external: true
