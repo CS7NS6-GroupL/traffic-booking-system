@@ -45,3 +45,9 @@ infra/k8s/**/*.secret.yaml
 .coverage
 htmlcov/
 coverage.xml
+
+
+
+CLAUDE.md
+services/route-service/pbfs/
+*.osm.pbf

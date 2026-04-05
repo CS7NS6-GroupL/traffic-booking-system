@@ -17,11 +17,15 @@ Entry point for all journey booking requests. Validates the driver JWT, delegate
 {
   "driver_id": "drv-001",
   "vehicle_id": "veh-abc",
-  "origin": "A",
-  "destination": "Z",
+  "origin": "Dublin City Centre, Ireland",
+  "destination": "Mumbai, India",
   "departure_time": "2026-04-01T09:00:00Z"
 }
 ```
+
+`origin` and `destination` are human-readable place names. Geocoding to road-network nodes
+is handled by route-service — booking-service passes these strings through unchanged to
+journey-management, which passes them to route-service.
 
 ### Response — single-region (202)
 ```json

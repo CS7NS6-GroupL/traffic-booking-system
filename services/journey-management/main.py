@@ -28,8 +28,34 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import httpx
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderTimedOut
 
 sys.path.insert(0, "/app/shared")
+
+_geocoder = Nominatim(user_agent="journey-management-tcd")
+
+# Maps the country name returned by Nominatim to the region served by this system.
+# Add entries here as more regional route-service data is imported.
+COUNTRY_TO_REGION: dict[str, str] = {
+    # europe region
+    "Ireland":        "europe",
+    "United Kingdom": "europe",
+    "France":         "europe",
+    "Germany":        "europe",
+    "Austria":        "europe",
+    "Hungary":        "europe",
+    "Romania":        "europe",
+    "Bulgaria":       "europe",
+    # middle-east region (transit corridor)
+    "Turkey":         "middle-east",
+    "Iran":           "middle-east",
+    "Pakistan":       "middle-east",
+    # south-asia region
+    "India":          "south-asia",
+    # north-america region
+    "United States":  "north-america",
+}
 
 app = FastAPI(title="Journey Management Service")
 
@@ -39,38 +65,48 @@ MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 JWT_SECRET = os.getenv("JWT_SECRET", "changeme")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 
-# Per-region route-service URLs — in production these point to separate clusters.
-# In local docker-compose all three resolve to the same container.
+# Per-region route-service URLs.
+# In production each points to a separate regional cluster.
+# Locally all resolve to the same container (single-region demo mode).
 REGION_ROUTE_URLS: dict[str, str] = {
-    "eu":    os.getenv("EU_ROUTE_URL",    "http://route-service:8000"),
-    "us":    os.getenv("US_ROUTE_URL",    "http://route-service:8000"),
-    "asia":  os.getenv("ASIA_ROUTE_URL",  "http://route-service:8000"),
-    "local": os.getenv("LOCAL_ROUTE_URL", "http://route-service:8000"),
+    "europe":        os.getenv("EUROPE_ROUTE_URL",        "http://route-service:8000"),
+    "middle-east":   os.getenv("MIDDLE_EAST_ROUTE_URL",   "http://route-service:8000"),
+    "south-asia":    os.getenv("SOUTH_ASIA_ROUTE_URL",    "http://route-service:8000"),
+    "north-america": os.getenv("NORTH_AMERICA_ROUTE_URL", "http://route-service:8000"),
 }
+
+# ── Gateway node IDs ──────────────────────────────────────────────────────────
+# Real OSM node IDs at physical border crossings.
+# These nodes must exist in BOTH adjacent regions' graphs.
+#
+# To find them once the OSM data is imported, run these queries in mongosh:
+#
+#   Bulgaria/Turkey border (Kapitan Andreevo, ~41.7445°N 26.3570°E):
+#   db.osm_nodes.find_one({loc:{$near:{$geometry:{type:"Point",coordinates:[26.357,41.7445]},$maxDistance:500}}})
+#
+#   Pakistan/India border (Wagah crossing, ~31.6040°N 74.5730°E):
+#   db.osm_nodes.find_one({loc:{$near:{$geometry:{type:"Point",coordinates:[74.573,31.604]},$maxDistance:500}}})
+#
+GATEWAY_EU_ME = os.getenv("GATEWAY_EU_ME", "")   # Bulgaria/Turkey border OSM node ID
+GATEWAY_ME_SA = os.getenv("GATEWAY_ME_SA", "")   # Pakistan/India border OSM node ID
 
 # ── Overlay graph ─────────────────────────────────────────────────────────────
-# Small region-level graph: nodes = regions, edges = feasible border corridors.
-# "exit" is the last node inside the source region; "entry" is the first node
-# inside the destination region (they share the gateway node name).
+# Region-level graph: nodes = regions, edges = land corridors between them.
+# north-america has no land connection to other regions (ocean barriers).
+# "exit" / "entry" are OSM node IDs at the physical border crossing — they are
+# the same node because both adjacent regions include it in their road graph.
 OVERLAY: dict[str, dict] = {
-    "eu": {
-        "us": {"exit": "EU_US_GW", "entry": "EU_US_GW", "cost_km": 500},
+    "europe": {
+        "middle-east": {"exit": GATEWAY_EU_ME, "entry": GATEWAY_EU_ME, "cost_km": 3000},
     },
-    "us": {
-        "eu":   {"exit": "EU_US_GW",   "entry": "EU_US_GW",   "cost_km": 500},
-        "asia": {"exit": "US_ASIA_GW", "entry": "US_ASIA_GW", "cost_km": 800},
+    "middle-east": {
+        "europe":     {"exit": GATEWAY_EU_ME, "entry": GATEWAY_EU_ME, "cost_km": 3000},
+        "south-asia": {"exit": GATEWAY_ME_SA, "entry": GATEWAY_ME_SA, "cost_km": 2000},
     },
-    "asia": {
-        "us": {"exit": "US_ASIA_GW", "entry": "US_ASIA_GW", "cost_km": 800},
+    "south-asia": {
+        "middle-east": {"exit": GATEWAY_ME_SA, "entry": GATEWAY_ME_SA, "cost_km": 2000},
     },
-    "local": {},
-}
-
-# Which road-network node belongs to which region
-NODE_REGION: dict[str, str] = {
-    "A": "eu", "B": "eu", "C": "eu", "D": "eu", "EU_US_GW": "eu",
-    "X": "us", "Y": "us", "Z": "us", "US_ASIA_GW": "us",
-    "P": "asia", "Q": "asia", "R": "asia",
+    "north-america": {},   # isolated — no land corridor to any other region
 }
 
 
@@ -123,10 +159,34 @@ def _overlay_shortest_path(origin_region: str, dest_region: str) -> list[str]:
     return []  # no path found
 
 
+def _region_for_place(place: str) -> str:
+    """
+    Geocode a place name with Nominatim and map the country to a region.
+    Raises HTTP 422 if the place is unknown or in an unserved country.
+    """
+    try:
+        location = _geocoder.geocode(place, addressdetails=True, timeout=10)
+    except GeocoderTimedOut:
+        raise HTTPException(status_code=503, detail=f"Geocoding timed out for '{place}'")
+    if not location:
+        raise HTTPException(status_code=404, detail=f"Could not geocode '{place}'")
+    country = location.raw.get("address", {}).get("country", "")
+    region = COUNTRY_TO_REGION.get(country)
+    if not region:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{place}' is in {country!r} which is not served by this system",
+        )
+    return region
+
+
 async def _call_regional_route(region: str, origin: str, destination: str) -> dict:
     """Call a regional route-service for one leg."""
-    base_url = REGION_ROUTE_URLS.get(region, REGION_ROUTE_URLS["local"])
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    base_url = REGION_ROUTE_URLS.get(region)
+    if not base_url:
+        raise HTTPException(status_code=422, detail=f"No route-service configured for region '{region}'")
+    # A* on a large graph can take several seconds — allow up to 60s
+    async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.get(f"{base_url}/routes", params={"origin": origin, "destination": destination})
         if resp.status_code == 404:
             raise HTTPException(
@@ -164,19 +224,15 @@ async def plan_journey(req: PlanRequest):
     Each regional route-service is only asked about its own territory — no service
     ever holds a monolithic global road graph.
     """
-    origin_region = NODE_REGION.get(req.origin)
-    dest_region = NODE_REGION.get(req.destination)
-
-    if not origin_region:
-        raise HTTPException(status_code=422, detail=f"Unknown origin node '{req.origin}'")
-    if not dest_region:
-        raise HTTPException(status_code=422, detail=f"Unknown destination node '{req.destination}'")
+    origin_region = _region_for_place(req.origin)
+    dest_region   = _region_for_place(req.destination)
 
     region_sequence = _overlay_shortest_path(origin_region, dest_region)
     if not region_sequence:
         raise HTTPException(
             status_code=404,
-            detail=f"No inter-region corridor from '{origin_region}' to '{dest_region}'",
+            detail=f"No land corridor exists between '{origin_region}' and '{dest_region}' "
+                   f"— regions are separated by ocean with no road connection",
         )
 
     # Build legs: each leg runs from leg_origin to leg_destination within one region
