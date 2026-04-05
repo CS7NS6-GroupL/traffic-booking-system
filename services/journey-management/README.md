@@ -1,7 +1,7 @@
-# Journey Management Service  (Journey Orchestrator)
+# Journey Management Service (Journey Orchestrator)
 
 Two responsibilities:
-1. **Route planning** — holds the region overlay graph; plans multi-leg cross-region journeys.
+1. **Route planning** — holds a region-level overlay graph; geocodes origin/destination to their regions; plans multi-leg cross-region journeys by delegating each leg to the appropriate regional route-service.
 2. **Booking lifecycle + cross-region saga coordinator** — retrieve/cancel bookings, orchestrate distributed capacity reservations with compensating transactions.
 
 **Owner:** Dylan Thompson (20314016)
@@ -12,11 +12,11 @@ Two responsibilities:
 |--------|------|-------------|
 | GET | `/health` | Liveness probe |
 | POST | `/plan` | Resolve a global route via the overlay graph |
-| GET | `/journeys` | List driver's bookings |
-| GET | `/journeys/{booking_id}` | Get a specific booking |
-| DELETE | `/journeys/{booking_id}` | Cancel (compensating transactions) |
+| GET | `/journeys` | List driver's bookings (JWT required) |
+| GET | `/journeys/{booking_id}` | Get a specific booking (JWT required) |
+| DELETE | `/journeys/{booking_id}` | Cancel booking with compensating transactions (JWT required) |
 | POST | `/sagas` | Start a cross-region saga (called by booking-service) |
-| GET | `/sagas/{saga_id}` | Get saga state |
+| GET | `/sagas/{saga_id}` | Get saga state (JWT required) |
 
 ---
 
@@ -25,41 +25,64 @@ Two responsibilities:
 This service holds a **coarse region-level overlay graph** (not the road-level graphs, which are owned by the regional route-services).
 
 ```
-Overlay nodes: eu, us, asia
-Overlay edges (border corridors):
-  eu  ──EU_US_GW──  us  ──US_ASIA_GW──  asia
+Overlay nodes:   europe,  middle-east,  south-asia,  north-america
+
+Land corridors:
+  europe ──[Bulgaria/Turkey border]── middle-east ──[Wagah crossing]── south-asia
+
+  north-america: isolated (ocean barriers — no land connection to other regions)
 ```
 
 ### POST /plan
 
 ```json
-{ "origin": "A", "destination": "Z" }
+{ "origin": "Dublin, Ireland", "destination": "Mumbai, India" }
 ```
 
-1. Look up `origin_region = NODE_REGION["A"]` → `"eu"`
-2. Look up `dest_region = NODE_REGION["Z"]` → `"us"`
-3. Dijkstra on overlay → region sequence `["eu", "us"]`
-4. Leg 1: call EU route-service `GET /routes?origin=A&destination=EU_US_GW`
-5. Leg 2: call US route-service `GET /routes?origin=EU_US_GW&destination=Z`
-6. Combine → return `segments_by_region`, `is_cross_region`, `legs`
+1. Geocode `origin` via Nominatim → country → `"europe"`
+2. Geocode `destination` via Nominatim → country → `"south-asia"`
+3. Dijkstra on overlay → region sequence `["europe", "middle-east", "south-asia"]`
+4. Leg 1: call europe route-service `GET /routes?origin=Dublin, Ireland&destination=<EU_ME_gateway_node_id>`
+5. Leg 2: call middle-east route-service `GET /routes?origin=<EU_ME_gateway_node_id>&destination=<ME_SA_gateway_node_id>`
+6. Leg 3: call south-asia route-service `GET /routes?origin=<ME_SA_gateway_node_id>&destination=Mumbai, India`
+7. Combine → return `segments_by_region`, `is_cross_region`, `legs`
 
-Each regional route-service is only ever asked about its own territory.
+**No land corridor → 404:**
+```json
+{ "origin": "Austin, Texas", "destination": "Dublin, Ireland" }
+→ 404 "No land corridor exists between 'north-america' and 'europe' — regions are separated by ocean"
+```
 
 ### Example response
 ```json
 {
-  "origin": "A", "destination": "Z",
-  "region_sequence": ["eu", "us"],
+  "origin": "Dublin, Ireland",
+  "destination": "Mumbai, India",
+  "region_sequence": ["europe", "middle-east", "south-asia"],
   "is_cross_region": true,
   "segments_by_region": {
-    "eu": [{"from": "A", "to": "B", ...}, ...],
-    "us": [{"from": "EU_US_GW", "to": "X", ...}, ...]
+    "europe":      [{"from": "...", "to": "...", "distance_km": 0.01, "region": "europe"}, ...],
+    "middle-east": [...],
+    "south-asia":  [...]
   },
   "legs": [
-    {"leg_index": 0, "region": "eu", "origin": "A", "destination": "EU_US_GW", ...},
-    {"leg_index": 1, "region": "us", "origin": "EU_US_GW", "destination": "Z", ...}
+    {"leg_index": 0, "region": "europe",      "origin": "Dublin, Ireland", "destination": "<gateway_node>", ...},
+    {"leg_index": 1, "region": "middle-east", "origin": "<gateway_node>",  "destination": "<gateway_node>", ...},
+    {"leg_index": 2, "region": "south-asia",  "origin": "<gateway_node>",  "destination": "Mumbai, India", ...}
   ]
 }
+```
+
+### Gateway node IDs
+
+Gateway nodes are real OSM node IDs at physical border crossings. They must exist in both adjacent regions' graphs. Set via environment variables (see below). To find them after data import, run in mongosh:
+
+```js
+// Bulgaria/Turkey border (Kapitan Andreevo, ~41.7445°N 26.3570°E)
+db.osm_nodes.find_one({loc:{$near:{$geometry:{type:"Point",coordinates:[26.357,41.7445]},$maxDistance:500}}})
+
+// Pakistan/India border - Wagah crossing (~31.6040°N 74.5730°E)
+db.osm_nodes.find_one({loc:{$near:{$geometry:{type:"Point",coordinates:[74.573,31.604]},$maxDistance:500}}})
 ```
 
 ---
@@ -92,7 +115,7 @@ Saga state machine:
 ### Consistency model
 
 Within a region: Redis distributed locks provide strong consistency (no overbooking).
-Across regions: The saga provides atomicity at the application level. The consistency window is bounded by Kafka consumer lag.
+Across regions: The saga provides atomicity at the application level. The consistency window is bounded by Kafka consumer lag (typically < 1s).
 
 ---
 
@@ -102,12 +125,36 @@ For cross-region bookings: publishes one `capacity-releases` message per involve
 
 ---
 
+## Region Coverage
+
+| Region | Countries | Route-service env var |
+|---|---|---|
+| `europe` | Ireland, UK, France, Germany, Austria, Hungary, Romania, Bulgaria | `EUROPE_ROUTE_URL` |
+| `middle-east` | Turkey, Iran, Pakistan | `MIDDLE_EAST_ROUTE_URL` |
+| `south-asia` | India | `SOUTH_ASIA_ROUTE_URL` |
+| `north-america` | United States | `NORTH_AMERICA_ROUTE_URL` |
+
+To add a new country: import its OSM data with the correct `--region` tag (see route-service README) and add the country to `COUNTRY_TO_REGION` in `main.py`.
+
+---
+
 ## Environment Variables
+
 | Variable | Purpose |
 |---|---|
-| `EU_ROUTE_URL` | URL of EU cluster route-service |
-| `US_ROUTE_URL` | URL of US cluster route-service |
-| `ASIA_ROUTE_URL` | URL of Asia cluster route-service |
+| `EUROPE_ROUTE_URL` | URL of europe cluster route-service |
+| `MIDDLE_EAST_ROUTE_URL` | URL of middle-east cluster route-service |
+| `SOUTH_ASIA_ROUTE_URL` | URL of south-asia cluster route-service |
+| `NORTH_AMERICA_ROUTE_URL` | URL of north-america cluster route-service |
+| `GATEWAY_EU_ME` | OSM node ID at Bulgaria/Turkey border crossing |
+| `GATEWAY_ME_SA` | OSM node ID at Pakistan/India (Wagah) border crossing |
 | `KAFKA_BOOTSTRAP_SERVERS` | Kafka broker(s) |
 | `MONGO_URI` | MongoDB connection string |
 | `JWT_SECRET` | Token signing key |
+
+## Key Technologies
+- **FastAPI** — async REST API
+- **geopy / Nominatim** — geocodes place names to determine region
+- **httpx** — async HTTP client for calling regional route-services
+- **kafka-python** — saga outcome consumer + capacity-release producer
+- **pymongo** — saga/booking persistence

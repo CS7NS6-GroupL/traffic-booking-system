@@ -1,55 +1,96 @@
 # Route Service
 
-Region-partitioned road network service. This service is **deliberately autonomous** — it only ever knows about its own region's roads. Cross-region route planning is handled by the Journey Orchestrator (journey-management), not here.
+Region-partitioned road network service. Loads its region's real driving road graph from MongoDB at startup and serves A* shortest-path queries within that region. This service is **deliberately autonomous** — it only ever knows about its own region's roads. Cross-region planning is handled by journey-management.
 
 **Owner:** Kartik Singhal (25369980)
-
-## Design principle
-
-Each cluster runs its own route-service with its own regional road graph. No service holds a global road map. The Journey Orchestrator holds a small region-level overlay graph (3 nodes: EU, US, Asia) and delegates individual legs to the appropriate regional route-service. This keeps each region autonomous and the system scalable.
 
 ## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Liveness probe |
-| GET | `/routes?origin=A&destination=EU_US_GW` | Shortest path within this region only |
-| GET | `/routes/segments` | All segments in this region (read by the orchestrator) |
-| GET | `/routes/nodes` | All nodes in this region |
+| GET | `/health` | Liveness probe — also reports live node/edge counts |
+| GET | `/routes?origin=X&destination=Y` | A* shortest path within this region |
+| GET | `/geocode?place=X` | Resolve a place name to the nearest OSM node in this region |
 
-## Regional Graph Structure
+`origin` / `destination` accept either a **place name** (e.g. `"Dublin City Centre"`) or a numeric **OSM node ID** (used by journey-management when requesting legs that end at a gateway node).
 
-Each cluster holds only its own road network. Adjacent regions share one **gateway node** that acts as the cross-region entry/exit point:
+## Data Pipeline
 
+Road data is loaded from real OpenStreetMap extracts (downloaded from [Geofabrik](https://download.geofabrik.de)) and imported into MongoDB using the bundled script.
+
+```bash
+# One-time import per region (run from services/route-service/)
+pip install -r requirements_import.txt
+python import_osm.py --pbf pbfs/ireland-and-northern-ireland.osm.pbf --region europe
+python import_osm.py --pbf pbfs/great-britain.osm.pbf --region europe
+# ... repeat for all countries in a region (see import_all.bat)
 ```
-EU:  A ─ B ─ C ─ D ─── EU_US_GW
-                              │
-US:               EU_US_GW ─ X ─ Y ─ Z ─── US_ASIA_GW
-                                                  │
-Asia:                         US_ASIA_GW ─ P ─ Q ─ R
-```
 
-When the orchestrator needs the EU leg of a Dublin→New York journey it calls:
-```
-GET /routes?origin=A&destination=EU_US_GW
-```
-It never asks this service about US roads.
+All countries in a region are imported with the same `--region` tag and merged into a single in-memory graph at startup.
 
-## Example Response
+## Startup
 
+On startup the service loads its region's full graph from MongoDB into memory:
+- `osm_nodes` collection → node coordinates dict
+- `osm_edges` collection → adjacency dict
+
+The service will not accept requests until loading completes. For a full European graph (~4.6M nodes, ~9.2M edges for Ireland alone) this takes 1–2 minutes.
+
+## Routing
+
+Uses **A\*** with a haversine distance heuristic (straight-line distance to goal). The heuristic is admissible — roads are never shorter than a straight line — so A* is guaranteed to find the shortest path. Significantly faster than Dijkstra on geographically large graphs.
+
+## Geocoding
+
+Place names are resolved via **Nominatim** (free OSM-based geocoder) to coordinates, then snapped to the nearest graph node using MongoDB's `2dsphere` index (`$near` query). OSM node IDs passed directly bypass geocoding entirely.
+
+## Example Responses
+
+```bash
+GET /routes?origin=Dublin&destination=Cork
+```
 ```json
 {
-  "origin": "A",
-  "destination": "EU_US_GW",
-  "path": ["A", "B", "D", "EU_US_GW"],
+  "origin": "Dublin",
+  "destination": "Cork",
+  "origin_node": "12020904933",
+  "destination_node": "8062498128",
+  "path": ["12020904933", "...", "8062498128"],
+  "total_distance_km": 245.18,
   "segments": [
-    {"from": "A", "to": "B", "segment_id": "eu-AB", "capacity": 100, "distance_km": 12, "region": "eu"},
+    {"from": "12020904933", "to": "5300250107", "distance_km": 0.011, "region": "europe"},
     ...
   ],
-  "region": "eu"
+  "region": "europe"
 }
 ```
 
+```bash
+GET /geocode?place=Dublin Airport
+```
+```json
+{"place": "Dublin Airport", "node_id": "289762316", "lat": 53.4283, "lng": -6.2447, "region": "europe"}
+```
+
+## MongoDB Collections
+
+| Collection | Schema | Purpose |
+|---|---|---|
+| `osm_nodes` | `{_id: osm_id, loc: GeoJSON Point, region: str}` | Node coordinates + 2dsphere index for nearest-node lookup |
+| `osm_edges` | `{from: str, to: str, distance_km: float, road_type: str, region: str}` | Adjacency data loaded into memory at startup |
+
+## Region Coverage
+
+| Region tag | Countries imported |
+|---|---|
+| `europe` | Ireland, Great Britain, France, Germany, Austria, Hungary, Romania, Bulgaria |
+| `middle-east` | Turkey, Iran, Pakistan |
+| `south-asia` | India |
+| `north-america` | Texas (US) |
+
 ## Key Technologies
-- **NetworkX** — directed weighted graph, Dijkstra shortest path
-- **FastAPI** — REST API, no async needed (pure in-memory graph, no external calls)
+- **FastAPI** — REST API, sync startup (graph load), sync routing
+- **pymongo** — loads graph from MongoDB at startup
+- **geopy / Nominatim** — place name → coordinates geocoding
+- **A\*** — in-memory shortest path with haversine heuristic
+- **MongoDB 2dsphere index** — nearest-node snapping
