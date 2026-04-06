@@ -87,24 +87,21 @@ REGION_ROUTE_URLS: dict[str, str] = {
 #   Pakistan/India border (Wagah crossing, ~31.6040°N 74.5730°E):
 #   db.osm_nodes.find_one({loc:{$near:{$geometry:{type:"Point",coordinates:[74.573,31.604]},$maxDistance:500}}})
 #
-GATEWAY_EU_ME = os.getenv("GATEWAY_EU_ME", "")   # Bulgaria/Turkey border OSM node ID
-GATEWAY_ME_SA = os.getenv("GATEWAY_ME_SA", "")   # Pakistan/India border OSM node ID
+GATEWAY_EU_EXIT = os.getenv("GATEWAY_EU_EXIT", "")   # Bulgaria side of EU/ME border
+GATEWAY_ME_ENTRY = os.getenv("GATEWAY_ME_ENTRY", "") # Turkey side of EU/ME border
 
 # ── Overlay graph ─────────────────────────────────────────────────────────────
 # Region-level graph: nodes = regions, edges = land corridors between them.
 # north-america has no land connection to other regions (ocean barriers).
-# "exit" / "entry" are OSM node IDs at the physical border crossing — they are
-# the same node because both adjacent regions include it in their road graph.
+# "exit" = last node in the departing region's graph at the border crossing.
+# "entry" = first node in the arriving region's graph at the border crossing.
+# These differ because Bulgaria and Turkey OSM extracts use separate node IDs.
 OVERLAY: dict[str, dict] = {
     "europe": {
-        "middle-east": {"exit": GATEWAY_EU_ME, "entry": GATEWAY_EU_ME, "cost_km": 3000},
+        "middle-east": {"exit": GATEWAY_EU_EXIT, "entry": GATEWAY_ME_ENTRY, "cost_km": 3000},
     },
     "middle-east": {
-        "europe":     {"exit": GATEWAY_EU_ME, "entry": GATEWAY_EU_ME, "cost_km": 3000},
-        "south-asia": {"exit": GATEWAY_ME_SA, "entry": GATEWAY_ME_SA, "cost_km": 2000},
-    },
-    "south-asia": {
-        "middle-east": {"exit": GATEWAY_ME_SA, "entry": GATEWAY_ME_SA, "cost_km": 2000},
+        "europe":     {"exit": GATEWAY_ME_ENTRY, "entry": GATEWAY_EU_EXIT, "cost_km": 3000},
     },
     "north-america": {},   # isolated — no land corridor to any other region
 }

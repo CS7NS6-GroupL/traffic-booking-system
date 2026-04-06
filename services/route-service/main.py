@@ -58,13 +58,31 @@ def _load_graph():
         node_coords[doc["_id"]] = (lat, lng)
     print(f"[route-service] {len(node_coords):,} nodes loaded.")
 
+    # Residential and unclassified roads are excluded — they account for ~70% of
+    # edges but are not useful for inter-city routing and would exhaust container memory.
+    MAJOR_ROADS = {"motorway", "motorway_link", "trunk", "trunk_link",
+                   "primary", "primary_link", "secondary", "secondary_link",
+                   "tertiary", "tertiary_link"}
+
     print(f"[route-service] Loading edges for region '{REGION}'...")
     edge_count = 0
-    for doc in db.osm_edges.find({"region": REGION}, {"from": 1, "to": 1, "distance_km": 1}):
+    for doc in db.osm_edges.find(
+        {"region": REGION, "road_type": {"$in": list(MAJOR_ROADS)}},
+        {"from": 1, "to": 1, "distance_km": 1},
+    ):
         f, t, d = doc["from"], doc["to"], doc["distance_km"]
         adjacency.setdefault(f, {})[t] = d
         edge_count += 1
-    print(f"[route-service] {edge_count:,} edges loaded. Graph ready.")
+
+    # Prune node coords to only nodes reachable via major roads
+    reachable = set(adjacency.keys())
+    for neighbours in adjacency.values():
+        reachable.update(neighbours.keys())
+    pruned = {nid: coords for nid, coords in node_coords.items() if nid in reachable}
+    node_coords.clear()
+    node_coords.update(pruned)
+
+    print(f"[route-service] {edge_count:,} edges, {len(node_coords):,} nodes loaded. Graph ready.")
 
 
 # ── A* ────────────────────────────────────────────────────────────────────────
