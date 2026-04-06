@@ -4,7 +4,7 @@ Two responsibilities:
 1. **Route planning** — holds a region-level overlay graph; geocodes origin/destination to their regions; plans multi-leg cross-region journeys by delegating each leg to the appropriate regional route-service.
 2. **Booking lifecycle + cross-region saga coordinator** — retrieve/cancel bookings, orchestrate distributed capacity reservations with compensating transactions.
 
-**Owner:** Dylan Thompson (20314016)
+**Owner:** Kartik Singhal (25369980)
 
 ## API Endpoints
 
