@@ -30,11 +30,18 @@ All countries in a region are imported with the same `--region` tag and merged i
 
 ## Startup
 
-On startup the service loads its region's full graph from MongoDB into memory:
+On startup the service loads its region's graph from MongoDB into memory:
 - `osm_nodes` collection → node coordinates dict
-- `osm_edges` collection → adjacency dict
+- `osm_edges` collection → adjacency dict (major roads only — see below)
 
-The service will not accept requests until loading completes. For a full European graph (~4.6M nodes, ~9.2M edges for Ireland alone) this takes 1–2 minutes.
+The service will not accept requests until loading completes. Loading takes 1–2 minutes; `/health` reports live counts when ready.
+
+### Road type filter
+
+Only major road types are loaded into the in-memory graph:
+`motorway`, `motorway_link`, `trunk`, `trunk_link`, `primary`, `primary_link`, `secondary`, `secondary_link`, `tertiary`, `tertiary_link`
+
+Residential and unclassified streets account for ~70% of OSM edges but add no value for inter-city routing. Excluding them reduces memory from ~10 GB to ~2–3 GB for Ireland + Bulgaria combined, leaving headroom for A* search and other containers.
 
 ## Routing
 
