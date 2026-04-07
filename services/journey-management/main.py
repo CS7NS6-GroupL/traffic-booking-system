@@ -38,10 +38,13 @@ _geocoder = Nominatim(user_agent="journey-management-tcd")
 # Maps the country name returned by Nominatim to the region served by this system.
 # Add entries here as more regional route-service data is imported.
 COUNTRY_TO_REGION: dict[str, str] = {
-    # europe region — Ireland + Northern Ireland (UK) + Bulgaria imported
+    # europe region
     "Ireland":        "europe",
+    "Éire / Ireland": "europe",
+    "Éire":           "europe",
     "United Kingdom": "europe",
     "Bulgaria":       "europe",
+    "Andorra":        "europe",
     # middle-east region — Turkey imported
     "Turkey":         "middle-east",
     # north-america region — Texas (US) imported
