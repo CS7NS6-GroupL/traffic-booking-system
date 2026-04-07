@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Notification Service Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
+    h2 { color: #569cd6; }
+    input { padding: 6px; width: 200px; background: #3c3c3c; color: white; border: 1px solid #555; }
+    button { padding: 6px 14px; margin-left: 6px; cursor: pointer; background: #0e639c; color: white; border: none; }
+    button:hover { background: #1177bb; }
+    #log { margin-top: 20px; background: #252526; padding: 14px; border: 1px solid #444; min-height: 120px; }
+    .ok  { color: #4ec9b0; }
+    .err { color: #f44747; }
+    .msg { color: #dcdcaa; }
+    .info { color: #9cdcfe; }
+  </style>
+</head>
+<body>
+
+<h2>Notification Service — WebSocket Tester</h2>
+
+<label>Driver ID: </label>
+<input id="driverInput" type="text" value="testdriver" />
+<button onclick="connect()">Connect</button>
+<button onclick="disconnect()">Disconnect</button>
+
+<div id="log"><span class="info">Press Connect to open a WebSocket for a driver.</span></div>
+
+<script>
+  let ws = null;
+
+  function log(msg, cls) {
+    const div = document.getElementById('log');
+    div.innerHTML += `<br><span class="${cls}">[${new Date().toLocaleTimeString()}] ${msg}</span>`;
+  }
+
+  function connect() {
+    const driverId = document.getElementById('driverInput').value.trim();
+    if (!driverId) { log('Enter a driver ID first.', 'err'); return; }
+    if (ws) { ws.close(); }
+
+    ws = new WebSocket(`ws://localhost:8007/ws/${driverId}`);
+
+    ws.onopen = () => {
+      log(`Connected as driver: ${driverId}`, 'ok');
+      log('Waiting for notifications from Kafka...', 'info');
+    };
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      log(`NOTIFICATION RECEIVED: ${JSON.stringify(data, null, 2)}`, 'msg');
+    };
+
+    ws.onerror = () => log('WebSocket error.', 'err');
+
+    ws.onclose = () => log('Disconnected.', 'err');
+  }
+
+  function disconnect() {
+    if (ws) { ws.close(); ws = null; }
+  }
+</script>
+
+</body>
+</html>
