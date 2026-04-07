@@ -1,8 +1,9 @@
 @echo off
 echo Starting OSM imports sequentially...
 
-echo [1/13] ireland (europe) - already imported, skipping
+echo [1/13] ireland (europe)
 REM python import_osm.py --pbf pbfs\ireland-and-northern-ireland-260404.osm.pbf --region europe
+echo ireland done.
 
 echo [2/13] great-britain (europe)
 python import_osm.py --pbf pbfs\great-britain-260404.osm.pbf --region europe
@@ -29,11 +30,11 @@ python import_osm.py --pbf pbfs\romania-260404.osm.pbf --region europe
 echo romania done.
 
 echo [8/13] bulgaria (europe)
-python import_osm.py --pbf pbfs\bulgaria-260404.osm.pbf --region europe
+REM python import_osm.py --pbf pbfs\bulgaria-260404.osm.pbf --region europe
 echo bulgaria done.
 
 echo [9/13] turkey (middle-east)
-python import_osm.py --pbf pbfs\turkey-260404.osm.pbf --region middle-east
+REM python import_osm.py --pbf pbfs\turkey-260404.osm.pbf --region middle-east
 echo turkey done.
 
 echo [10/13] iran (middle-east)
@@ -49,7 +50,7 @@ python import_osm.py --pbf pbfs\india-260404.osm.pbf --region south-asia
 echo india done.
 
 echo [13/13] texas (north-america)
-python import_osm.py --pbf pbfs\texas-260404.osm.pbf --region north-america
+REM python import_osm.py --pbf pbfs\texas-260404.osm.pbf --region north-america
 echo texas done.
 
 echo All imports complete.

@@ -158,6 +158,7 @@ def _flush_edges(collection, batch: list):
 def ensure_indexes(db):
     db.osm_nodes.create_index([("loc", GEOSPHERE)])
     db.osm_nodes.create_index([("region", ASCENDING)])
+    db.osm_edges.create_index([("region", ASCENDING)])
     db.osm_edges.create_index([("from", ASCENDING)])
     db.osm_edges.create_index([("from", ASCENDING), ("region", ASCENDING)])
     print("Indexes ensured.")

@@ -4,7 +4,7 @@ Two responsibilities:
 1. **Route planning** — holds a region-level overlay graph; geocodes origin/destination to their regions; plans multi-leg cross-region journeys by delegating each leg to the appropriate regional route-service.
 2. **Booking lifecycle + cross-region saga coordinator** — retrieve/cancel bookings, orchestrate distributed capacity reservations with compensating transactions.
 
-**Owner:** Dylan Thompson (20314016)
+**Owner:** Kartik Singhal (25369980)
 
 ## API Endpoints
 
@@ -75,14 +75,22 @@ Land corridors:
 
 ### Gateway node IDs
 
-Gateway nodes are real OSM node IDs at physical border crossings. They must exist in both adjacent regions' graphs. Set via environment variables (see below). To find them after data import, run in mongosh:
+Gateway nodes are real OSM node IDs at physical border crossings. Because Bulgaria and Turkey come from separate Geofabrik extracts, the closest node on each side will have a different ID — set both separately.
+
+To find them after data import, run in mongosh:
 
 ```js
-// Bulgaria/Turkey border (Kapitan Andreevo, ~41.7445°N 26.3570°E)
-db.osm_nodes.find_one({loc:{$near:{$geometry:{type:"Point",coordinates:[26.357,41.7445]},$maxDistance:500}}})
+// Bulgaria side (europe region)
+db.osm_nodes.findOne({loc:{$near:{$geometry:{type:"Point",coordinates:[26.357,41.7445]},$maxDistance:5000}},region:"europe"})
 
-// Pakistan/India border - Wagah crossing (~31.6040°N 74.5730°E)
-db.osm_nodes.find_one({loc:{$near:{$geometry:{type:"Point",coordinates:[74.573,31.604]},$maxDistance:500}}})
+// Turkey side (middle-east region)
+db.osm_nodes.findOne({loc:{$near:{$geometry:{type:"Point",coordinates:[26.357,41.7445]},$maxDistance:5000}},region:"middle-east"})
+```
+
+Set the results in `.env`:
+```
+GATEWAY_EU_EXIT=<_id from europe query>
+GATEWAY_ME_ENTRY=<_id from middle-east query>
 ```
 
 ---
@@ -146,8 +154,8 @@ To add a new country: import its OSM data with the correct `--region` tag (see r
 | `MIDDLE_EAST_ROUTE_URL` | URL of middle-east cluster route-service |
 | `SOUTH_ASIA_ROUTE_URL` | URL of south-asia cluster route-service |
 | `NORTH_AMERICA_ROUTE_URL` | URL of north-america cluster route-service |
-| `GATEWAY_EU_ME` | OSM node ID at Bulgaria/Turkey border crossing |
-| `GATEWAY_ME_SA` | OSM node ID at Pakistan/India (Wagah) border crossing |
+| `GATEWAY_EU_EXIT` | OSM node ID on Bulgaria side of border (europe graph) |
+| `GATEWAY_ME_ENTRY` | OSM node ID on Turkey side of border (middle-east graph) |
 | `KAFKA_BOOTSTRAP_SERVERS` | Kafka broker(s) |
 | `MONGO_URI` | MongoDB connection string |
 | `JWT_SECRET` | Token signing key |

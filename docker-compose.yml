@@ -102,7 +102,7 @@ services:
     ports:
       - "8001:8000"
     env_file:
-      - .env
+      - services/booking-service/.env
     environment:
       SERVICE_NAME: booking-service
       JOURNEY_MANAGEMENT_URL: http://journey-management:8000
@@ -124,7 +124,7 @@ services:
     ports:
       - "8002:8000"
     env_file:
-      - .env
+      - services/user-registry/.env
     environment:
       SERVICE_NAME: user-registry
     depends_on:
@@ -145,7 +145,7 @@ services:
     ports:
       - "8003:8000"
     env_file:
-      - .env
+      - services/authority-service/.env
     environment:
       SERVICE_NAME: authority-service
     depends_on:
@@ -166,7 +166,7 @@ services:
     ports:
       - "8004:8000"
     env_file:
-      - .env
+      - services/data-gateway/.env
     environment:
       SERVICE_NAME: data-gateway
     depends_on:
@@ -187,7 +187,7 @@ services:
     ports:
       - "8005:8000"
     env_file:
-      - .env
+      - services/validation-service/.env
     environment:
       SERVICE_NAME: validation-service
     depends_on:
@@ -208,14 +208,10 @@ services:
     ports:
       - "8006:8000"
     env_file:
-      - .env
+      - services/route-service/.env
     environment:
       SERVICE_NAME: route-service
     depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
       mongo:
         condition: service_healthy
     networks:
@@ -229,7 +225,7 @@ services:
     ports:
       - "8007:8000"
     env_file:
-      - .env
+      - services/notification-service/.env
     environment:
       SERVICE_NAME: notification-service
     depends_on:
@@ -250,15 +246,9 @@ services:
     ports:
       - "8008:8000"
     env_file:
-      - .env
+      - services/journey-management/.env
     environment:
       SERVICE_NAME: journey-management
-      # In a multi-cluster deployment these point to each region's route-service.
-      # Locally all three resolve to the same container (single-region demo).
-      EU_ROUTE_URL: http://route-service:8000
-      US_ROUTE_URL: http://route-service:8000
-      ASIA_ROUTE_URL: http://route-service:8000
-      LOCAL_ROUTE_URL: http://route-service:8000
     depends_on:
       kafka:
         condition: service_healthy

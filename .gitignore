@@ -16,6 +16,7 @@ env/
 
 # Environment secrets — never commit
 .env
+**/.env
 *.env.local
 
 # Docker
