@@ -113,3 +113,84 @@ app.get("/vehicle/:vehicleId", async (req, res) => {
     res.status(500).json({ error: "Error checking vehicle" });
   }
 });
+
+app.get("/vehicle/:vehicleId", async (req, res) => {
+  const { vehicleId } = req.params;
+
+  try {
+    const cached = await redis.get(`active:vehicle:${vehicleId}`);
+
+    if (cached) {
+      return res.json({
+        source: "redis",
+        booking: JSON.parse(cached)
+      });
+    }
+
+    const booking = await db.collection("bookings").findOne({
+      vehicleId,
+      status: "confirmed"
+    });
+
+    if (!booking) {
+      return res.status(404).json({ error: "No booking found" });
+    }
+
+    res.json({
+      source: "mongodb",
+      booking
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error checking vehicle" });
+  }
+});
+
+app.post("/cancel", async (req, res) => {
+  const { vehicleId, region, slot } = req.body;
+
+  try {
+    const booking = await db.collection("bookings").findOne({
+      vehicleId,
+      status: "confirmed"
+    });
+
+    if (!booking) {
+      return res.status(404).json({ error: "No confirmed booking found" });
+    }
+
+    await db.collection("bookings").updateOne(
+      { _id: booking._id },
+      {
+        $set: {
+          status: "cancelled",
+          updatedAt: new Date().toISOString()
+        }
+      }
+    );
+
+    if (region && slot) {
+      await redis.incr(`capacity:${region}:${slot}`);
+    }
+
+    await redis.del(`active:vehicle:${vehicleId}`);
+
+    await redis.publish(
+      "booking-events",
+      JSON.stringify({
+        type: "booking_cancelled",
+        bookingId: booking.bookingId,
+        vehicleId
+      })
+    );
+
+    res.json({
+      success: true,
+      message: "Booking cancelled",
+      bookingId: booking.bookingId
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Cancellation failed" });
+  }
+});
