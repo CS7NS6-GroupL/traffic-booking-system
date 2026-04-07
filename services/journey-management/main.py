@@ -38,17 +38,12 @@ _geocoder = Nominatim(user_agent="journey-management-tcd")
 # Maps the country name returned by Nominatim to the region served by this system.
 # Add entries here as more regional route-service data is imported.
 COUNTRY_TO_REGION: dict[str, str] = {
-    # europe region
-    "Ireland":        "europe",
-    "Éire / Ireland": "europe",
-    "Éire":           "europe",
-    "United Kingdom": "europe",
-    "Bulgaria":       "europe",
-    "Andorra":        "europe",
-    # middle-east region — Turkey imported
-    "Turkey":         "middle-east",
-    # north-america region — Texas (US) imported
-    "United States":  "north-america",
+    # andorra region — Andorra imported (isolated, no land corridor to other regions)
+    "Andorra":  "andorra",
+    # laos region — Laos imported
+    "Laos":     "laos",
+    # cambodia region — Cambodia imported (connected to laos via Voen Kham/Don Kralor crossing)
+    "Cambodia": "cambodia",
 }
 
 app = FastAPI(title="Journey Management Service")
@@ -63,9 +58,9 @@ KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 # In production each points to a separate regional cluster.
 # Locally all resolve to the same container (single-region demo mode).
 REGION_ROUTE_URLS: dict[str, str] = {
-    "europe":        os.getenv("EUROPE_ROUTE_URL",        "http://route-service-eu:8000"),
-    "middle-east":   os.getenv("MIDDLE_EAST_ROUTE_URL",   "http://route-service-me:8000"),
-    "north-america": os.getenv("NORTH_AMERICA_ROUTE_URL", "http://route-service-na:8000"),
+    "andorra":  os.getenv("ANDORRA_ROUTE_URL",  "http://route-service-andorra:8000"),
+    "laos":     os.getenv("LAOS_ROUTE_URL",     "http://route-service-laos:8000"),
+    "cambodia": os.getenv("CAMBODIA_ROUTE_URL", "http://route-service-cambodia:8000"),
 }
 
 # ── Gateway node IDs ──────────────────────────────────────────────────────────
@@ -74,29 +69,27 @@ REGION_ROUTE_URLS: dict[str, str] = {
 #
 # To find them once the OSM data is imported, run these queries in mongosh:
 #
-#   Bulgaria/Turkey border (Kapitan Andreevo, ~41.7445°N 26.3570°E):
-#   db.osm_nodes.find_one({loc:{$near:{$geometry:{type:"Point",coordinates:[26.357,41.7445]},$maxDistance:500}}})
+#   Laos/Cambodia border (Voen Kham/Don Kralor, ~13.92°N 105.79°E):
+#   db.osm_nodes.find_one({loc:{$near:{$geometry:{type:"Point",coordinates:[105.79,13.92]},$maxDistance:1000}},region:"laos"})
+#   db.osm_nodes.find_one({loc:{$near:{$geometry:{type:"Point",coordinates:[105.79,13.92]},$maxDistance:1000}},region:"cambodia"})
 #
-#   Pakistan/India border (Wagah crossing, ~31.6040°N 74.5730°E):
-#   db.osm_nodes.find_one({loc:{$near:{$geometry:{type:"Point",coordinates:[74.573,31.604]},$maxDistance:500}}})
-#
-GATEWAY_EU_EXIT = os.getenv("GATEWAY_EU_EXIT", "")   # Bulgaria side of EU/ME border
-GATEWAY_ME_ENTRY = os.getenv("GATEWAY_ME_ENTRY", "") # Turkey side of EU/ME border
+GATEWAY_LAOS_EXIT     = os.getenv("GATEWAY_LAOS_EXIT",     "")  # Laos side of Laos/Cambodia border
+GATEWAY_CAMBODIA_ENTRY = os.getenv("GATEWAY_CAMBODIA_ENTRY", "") # Cambodia side
 
 # ── Overlay graph ─────────────────────────────────────────────────────────────
 # Region-level graph: nodes = regions, edges = land corridors between them.
-# north-america has no land connection to other regions (ocean barriers).
+# andorra has no land corridor to other imported regions (mountainous micro-state).
 # "exit" = last node in the departing region's graph at the border crossing.
 # "entry" = first node in the arriving region's graph at the border crossing.
-# These differ because Bulgaria and Turkey OSM extracts use separate node IDs.
+# These differ because Laos and Cambodia OSM extracts use separate node IDs.
 OVERLAY: dict[str, dict] = {
-    "europe": {
-        "middle-east": {"exit": GATEWAY_EU_EXIT, "entry": GATEWAY_ME_ENTRY, "cost_km": 3000},
+    "laos": {
+        "cambodia": {"exit": GATEWAY_LAOS_EXIT, "entry": GATEWAY_CAMBODIA_ENTRY, "cost_km": 600},
     },
-    "middle-east": {
-        "europe": {"exit": GATEWAY_ME_ENTRY, "entry": GATEWAY_EU_EXIT, "cost_km": 3000},
+    "cambodia": {
+        "laos": {"exit": GATEWAY_CAMBODIA_ENTRY, "entry": GATEWAY_LAOS_EXIT, "cost_km": 600},
     },
-    "north-america": {},  # isolated — Texas has no land corridor to other imported regions
+    "andorra": {},  # isolated — no land corridor to other imported regions
 }
 
 
@@ -155,7 +148,7 @@ def _region_for_place(place: str) -> str:
     Raises HTTP 422 if the place is unknown or in an unserved country.
     """
     try:
-        location = _geocoder.geocode(place, addressdetails=True, timeout=10)
+        location = _geocoder.geocode(place, addressdetails=True, timeout=10, language="en")
     except GeocoderTimedOut:
         raise HTTPException(status_code=503, detail=f"Geocoding timed out for '{place}'")
     if not location:

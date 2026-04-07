@@ -150,33 +150,31 @@
                   <label class="form-label">Quick Routes</label>
                   <select class="form-select" id="route-select" onchange="applyQuickRoute(this.value)">
                     <option value="">— type below or pick a preset —</option>
-                    <optgroup label="Single-region (Europe — Ireland)">
-                      <option value="Dublin, Ireland|Cork, Ireland">Dublin → Cork  (Ireland)</option>
-                      <option value="Dublin, Ireland|Belfast, United Kingdom">Dublin → Belfast  (Ireland)</option>
-                      <option value="Cork, Ireland|Limerick, Ireland">Cork → Limerick  (Ireland)</option>
+                    <optgroup label="Single-region (Laos)">
+                      <option value="Vientiane, Laos|Luang Prabang, Laos">Vientiane → Luang Prabang</option>
+                      <option value="Vientiane, Laos|Pakse, Laos">Vientiane → Pakse</option>
                     </optgroup>
-                    <optgroup label="Single-region (Europe — Bulgaria)">
-                      <option value="Sofia, Bulgaria|Plovdiv, Bulgaria">Sofia → Plovdiv  (Bulgaria)</option>
-                      <option value="Sofia, Bulgaria|Varna, Bulgaria">Sofia → Varna  (Bulgaria)</option>
+                    <optgroup label="Single-region (Cambodia)">
+                      <option value="Phnom Penh, Cambodia|Siem Reap, Cambodia">Phnom Penh → Siem Reap</option>
+                      <option value="Phnom Penh, Cambodia|Sihanoukville, Cambodia">Phnom Penh → Sihanoukville</option>
                     </optgroup>
-                    <optgroup label="Cross-region ✈ EU → Middle-East">
-                      <option value="Sofia, Bulgaria|Istanbul, Turkey">Sofia → Istanbul  (EU → Middle-East via Kapitan Andreevo)</option>
-                      <option value="Plovdiv, Bulgaria|Ankara, Turkey">Plovdiv → Ankara  (EU → Middle-East)</option>
+                    <optgroup label="Cross-region ✈ Laos → Cambodia">
+                      <option value="Pakse, Laos|Stung Treng, Cambodia">Pakse → Stung Treng  (Laos → Cambodia via Voen Kham)</option>
+                      <option value="Vientiane, Laos|Phnom Penh, Cambodia">Vientiane → Phnom Penh  (Laos → Cambodia)</option>
                     </optgroup>
-                    <optgroup label="Single-region (North America — Texas)">
-                      <option value="Dallas, Texas|Houston, Texas">Dallas → Houston  (Texas)</option>
-                      <option value="Austin, Texas|San Antonio, Texas">Austin → San Antonio  (Texas)</option>
+                    <optgroup label="Single-region (Andorra)">
+                      <option value="Andorra la Vella, Andorra|Pas de la Casa, Andorra">Andorra la Vella → Pas de la Casa</option>
                     </optgroup>
                   </select>
                 </div>
                 <div class="row g-2 mb-2">
                   <div class="col-6">
                     <label class="form-label">Origin</label>
-                    <input class="form-control" id="origin-input" placeholder="e.g. Dublin, Ireland">
+                    <input class="form-control" id="origin-input" placeholder="e.g. Vientiane, Laos">
                   </div>
                   <div class="col-6">
                     <label class="form-label">Destination</label>
-                    <input class="form-control" id="dest-input" placeholder="e.g. Cork, Ireland">
+                    <input class="form-control" id="dest-input" placeholder="e.g. Phnom Penh, Cambodia">
                   </div>
                 </div>
                 <div class="mb-3">
@@ -639,15 +637,15 @@ const SERVICES = [
   { name:'Data Gateway',              path:'/api/health/gateway',        desc:'Cross-region HTTP + Atlas fallback' },
   { name:'Notification Service',      path:'/api/health/notification',   desc:'WebSocket push, Kafka consumer' },
   { name:'Journey Management',        path:'/api/health/journey',        desc:'Overlay planner + saga coordinator' },
-  // Europe cluster (Ireland + Bulgaria)
-  { name:'Route Service (EU)',         path:'/api/health/route-eu',       desc:'A* routing — Ireland + Bulgaria' },
-  { name:'Validation Service (EU)',    path:'/api/health/validation-eu',  desc:'Kafka consumer, Redis capacity — EU' },
-  // Middle-East cluster (Turkey)
-  { name:'Route Service (ME)',         path:'/api/health/route-me',       desc:'A* routing — Turkey' },
-  { name:'Validation Service (ME)',    path:'/api/health/validation-me',  desc:'Kafka consumer, Redis capacity — ME' },
-  // North-America cluster (Texas)
-  { name:'Route Service (NA)',         path:'/api/health/route-na',       desc:'A* routing — Texas' },
-  { name:'Validation Service (NA)',    path:'/api/health/validation-na',  desc:'Kafka consumer, Redis capacity — NA' },
+  // Laos cluster
+  { name:'Route Service (Laos)',       path:'/api/health/route-laos',          desc:'A* routing — Laos' },
+  { name:'Validation Service (Laos)',  path:'/api/health/validation-laos',     desc:'Kafka consumer, Redis capacity — Laos' },
+  // Cambodia cluster
+  { name:'Route Service (Cambodia)',   path:'/api/health/route-cambodia',      desc:'A* routing — Cambodia' },
+  { name:'Validation Service (Cambodia)', path:'/api/health/validation-cambodia', desc:'Kafka consumer, Redis capacity — Cambodia' },
+  // Andorra cluster (isolated)
+  { name:'Route Service (Andorra)',    path:'/api/health/route-andorra',       desc:'A* routing — Andorra' },
+  { name:'Validation Service (Andorra)', path:'/api/health/validation-andorra', desc:'Kafka consumer, Redis capacity — Andorra' },
 ];
 
 async function checkHealth() {

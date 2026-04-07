@@ -11,9 +11,9 @@ MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
 # Regional service base URLs (overridden via env in production)
 REGION_URLS = {
-    "europe":        os.getenv("EUROPE_DATA_URL",        "http://data-gateway-eu:8000"),
-    "middle-east":   os.getenv("MIDDLE_EAST_DATA_URL",   "http://data-gateway-me:8000"),
-    "north-america": os.getenv("NORTH_AMERICA_DATA_URL", "http://data-gateway-na:8000"),
+    "andorra":  os.getenv("ANDORRA_DATA_URL",  "http://data-gateway-andorra:8000"),
+    "laos":     os.getenv("LAOS_DATA_URL",     "http://data-gateway-laos:8000"),
+    "cambodia": os.getenv("CAMBODIA_DATA_URL", "http://data-gateway-cambodia:8000"),
 }
 
 

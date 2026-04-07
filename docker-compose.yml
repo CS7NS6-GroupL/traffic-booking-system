@@ -4,12 +4,11 @@ version: "3.9"
 # Brings up all application services across 3 regions + shared infrastructure.
 #
 # Regions and imported OSM data:
-#   europe       — Ireland, Northern Ireland (UK), Bulgaria
-#   middle-east  — Turkey
-#   north-america — Texas (US)
+#   andorra  — Andorra (isolated micro-state)
+#   laos     — Laos
+#   cambodia — Cambodia
 #
-# Cross-region saga demo: Europe (Bulgaria) ↔ Middle-East (Turkey)
-#   via Kapitan Andreevo / Kapikule border crossing.
+# Cross-region saga demo: Laos ↔ Cambodia via Voen Kham / Don Kralor border crossing.
 
 networks:
   traffic-net:
@@ -170,11 +169,11 @@ services:
       - services/journey-management/.env
     environment:
       SERVICE_NAME: journey-management
-      REGION: europe
+      REGION: laos
       # Point each region to its own route-service instance
-      EUROPE_ROUTE_URL: http://route-service-eu:8000
-      MIDDLE_EAST_ROUTE_URL: http://route-service-me:8000
-      NORTH_AMERICA_ROUTE_URL: http://route-service-na:8000
+      ANDORRA_ROUTE_URL: http://route-service-andorra:8000
+      LAOS_ROUTE_URL: http://route-service-laos:8000
+      CAMBODIA_ROUTE_URL: http://route-service-cambodia:8000
     depends_on:
       kafka:
         condition: service_healthy
@@ -196,14 +195,14 @@ services:
       - services/data-gateway/.env
     environment:
       SERVICE_NAME: data-gateway
-      REGION: europe
+      REGION: laos
     depends_on:
       mongo:
         condition: service_healthy
     networks:
       - traffic-net
 
-  # ── Europe cluster (Ireland + Bulgaria) ─────────────────────────────────────
+  # ── Laos cluster ────────────────────────────────────────────────────────────
 
   booking-service:
     build:
@@ -216,7 +215,7 @@ services:
       - services/booking-service/.env
     environment:
       SERVICE_NAME: booking-service
-      REGION: europe
+      REGION: laos
       JOURNEY_MANAGEMENT_URL: http://journey-management:8000
     depends_on:
       kafka:
@@ -228,36 +227,36 @@ services:
     networks:
       - traffic-net
 
-  route-service-eu:
+  route-service-laos:
     build:
       context: .
       dockerfile: services/route-service/Dockerfile
-    container_name: route-service-eu
+    container_name: route-service-laos
     ports:
       - "8006:8000"
     env_file:
       - services/route-service/.env
     environment:
-      SERVICE_NAME: route-service-eu
-      REGION: europe
+      SERVICE_NAME: route-service-laos
+      REGION: laos
     depends_on:
       mongo:
         condition: service_healthy
     networks:
       - traffic-net
 
-  validation-service-eu:
+  validation-service-laos:
     build:
       context: .
       dockerfile: services/validation-service/Dockerfile
-    container_name: validation-service-eu
+    container_name: validation-service-laos
     ports:
       - "8005:8000"
     env_file:
       - services/validation-service/.env
     environment:
-      SERVICE_NAME: validation-service-eu
-      REGION: europe
+      SERVICE_NAME: validation-service-laos
+      REGION: laos
     depends_on:
       kafka:
         condition: service_healthy
@@ -270,38 +269,38 @@ services:
     networks:
       - traffic-net
 
-  # ── Middle-East cluster (Turkey) ────────────────────────────────────────────
+  # ── Cambodia cluster ─────────────────────────────────────────────────────────
 
-  route-service-me:
+  route-service-cambodia:
     build:
       context: .
       dockerfile: services/route-service/Dockerfile
-    container_name: route-service-me
+    container_name: route-service-cambodia
     ports:
       - "8016:8000"
     env_file:
       - services/route-service/.env
     environment:
-      SERVICE_NAME: route-service-me
-      REGION: middle-east
+      SERVICE_NAME: route-service-cambodia
+      REGION: cambodia
     depends_on:
       mongo:
         condition: service_healthy
     networks:
       - traffic-net
 
-  validation-service-me:
+  validation-service-cambodia:
     build:
       context: .
       dockerfile: services/validation-service/Dockerfile
-    container_name: validation-service-me
+    container_name: validation-service-cambodia
     ports:
       - "8015:8000"
     env_file:
       - services/validation-service/.env
     environment:
-      SERVICE_NAME: validation-service-me
-      REGION: middle-east
+      SERVICE_NAME: validation-service-cambodia
+      REGION: cambodia
     depends_on:
       kafka:
         condition: service_healthy
@@ -314,38 +313,38 @@ services:
     networks:
       - traffic-net
 
-  # ── North-America cluster (Texas) ───────────────────────────────────────────
+  # ── Andorra cluster (isolated) ───────────────────────────────────────────────
 
-  route-service-na:
+  route-service-andorra:
     build:
       context: .
       dockerfile: services/route-service/Dockerfile
-    container_name: route-service-na
+    container_name: route-service-andorra
     ports:
       - "8026:8000"
     env_file:
       - services/route-service/.env
     environment:
-      SERVICE_NAME: route-service-na
-      REGION: north-america
+      SERVICE_NAME: route-service-andorra
+      REGION: andorra
     depends_on:
       mongo:
         condition: service_healthy
     networks:
       - traffic-net
 
-  validation-service-na:
+  validation-service-andorra:
     build:
       context: .
       dockerfile: services/validation-service/Dockerfile
-    container_name: validation-service-na
+    container_name: validation-service-andorra
     ports:
       - "8025:8000"
     env_file:
       - services/validation-service/.env
     environment:
-      SERVICE_NAME: validation-service-na
-      REGION: north-america
+      SERVICE_NAME: validation-service-andorra
+      REGION: andorra
     depends_on:
       kafka:
         condition: service_healthy
@@ -373,8 +372,8 @@ services:
       - authority-service
       - journey-management
       - notification-service
-      - route-service-eu
-      - validation-service-eu
+      - route-service-laos
+      - validation-service-laos
       - data-gateway
     networks:
       - traffic-net
