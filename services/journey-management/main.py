@@ -38,22 +38,13 @@ _geocoder = Nominatim(user_agent="journey-management-tcd")
 # Maps the country name returned by Nominatim to the region served by this system.
 # Add entries here as more regional route-service data is imported.
 COUNTRY_TO_REGION: dict[str, str] = {
-    # europe region
+    # europe region — Ireland + Northern Ireland (UK) + Bulgaria imported
     "Ireland":        "europe",
     "United Kingdom": "europe",
-    "France":         "europe",
-    "Germany":        "europe",
-    "Austria":        "europe",
-    "Hungary":        "europe",
-    "Romania":        "europe",
     "Bulgaria":       "europe",
-    # middle-east region (transit corridor)
+    # middle-east region — Turkey imported
     "Turkey":         "middle-east",
-    "Iran":           "middle-east",
-    "Pakistan":       "middle-east",
-    # south-asia region
-    "India":          "south-asia",
-    # north-america region
+    # north-america region — Texas (US) imported
     "United States":  "north-america",
 }
 
@@ -69,10 +60,9 @@ KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 # In production each points to a separate regional cluster.
 # Locally all resolve to the same container (single-region demo mode).
 REGION_ROUTE_URLS: dict[str, str] = {
-    "europe":        os.getenv("EUROPE_ROUTE_URL",        "http://route-service:8000"),
-    "middle-east":   os.getenv("MIDDLE_EAST_ROUTE_URL",   "http://route-service:8000"),
-    "south-asia":    os.getenv("SOUTH_ASIA_ROUTE_URL",    "http://route-service:8000"),
-    "north-america": os.getenv("NORTH_AMERICA_ROUTE_URL", "http://route-service:8000"),
+    "europe":        os.getenv("EUROPE_ROUTE_URL",        "http://route-service-eu:8000"),
+    "middle-east":   os.getenv("MIDDLE_EAST_ROUTE_URL",   "http://route-service-me:8000"),
+    "north-america": os.getenv("NORTH_AMERICA_ROUTE_URL", "http://route-service-na:8000"),
 }
 
 # ── Gateway node IDs ──────────────────────────────────────────────────────────
@@ -101,9 +91,9 @@ OVERLAY: dict[str, dict] = {
         "middle-east": {"exit": GATEWAY_EU_EXIT, "entry": GATEWAY_ME_ENTRY, "cost_km": 3000},
     },
     "middle-east": {
-        "europe":     {"exit": GATEWAY_ME_ENTRY, "entry": GATEWAY_EU_EXIT, "cost_km": 3000},
+        "europe": {"exit": GATEWAY_ME_ENTRY, "entry": GATEWAY_EU_EXIT, "cost_km": 3000},
     },
-    "north-america": {},   # isolated — no land corridor to any other region
+    "north-america": {},  # isolated — Texas has no land corridor to other imported regions
 }
 
 

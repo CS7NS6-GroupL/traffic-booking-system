@@ -101,8 +101,11 @@ async def create_booking(booking: BookingRequest, authorization: str = Header(..
 
     # ── Step 4a: single-region fast path ──────────────────────────────────────
     if not plan.get("is_cross_region", False):
+        # Use the journey's actual region (not this service's region) so the
+        # correct regional validation-service picks up the message.
+        journey_region = plan.get("regions_involved", [REGION])[0]
         try:
-            _publish_to_kafka({**base_message, "target_region": REGION})
+            _publish_to_kafka({**base_message, "target_region": journey_region})
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"Kafka unavailable: {exc}")
         return {

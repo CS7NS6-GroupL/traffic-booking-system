@@ -4,16 +4,14 @@ metadata:
   name: traffic-config
   namespace: eu
 data:
-  REGION: "eu"
+  REGION: "europe"
   KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
   REDIS_URL: "redis://redis:6379"
   MONGO_URI: "mongodb+srv://<user>:<pass>@cluster.mongodb.net/traffic?retryWrites=true"
+  JWT_SECRET: "changeme-replace-in-production"
   JWT_ALGORITHM: "HS256"
-  # Journey Orchestrator URL (booking-service → journey-management)
   JOURNEY_MANAGEMENT_URL: "http://journey-management:8000"
-  # Regional route-service URLs (journey-management overlay planner)
-  # EU is local; US and Asia are reached via data-gateway cross-region forwarding
-  EU_ROUTE_URL: "http://route-service:8000"
-  US_ROUTE_URL: "http://data-gateway-us:8000"
-  ASIA_ROUTE_URL: "http://data-gateway-asia:8000"
-  LOCAL_ROUTE_URL: "http://route-service:8000"
+  # Each region's route-service — in K8s, cross-region calls go via data-gateway
+  EUROPE_ROUTE_URL: "http://route-service:8000"
+  MIDDLE_EAST_ROUTE_URL: "http://data-gateway-me:8000"
+  NORTH_AMERICA_ROUTE_URL: "http://data-gateway-na:8000"

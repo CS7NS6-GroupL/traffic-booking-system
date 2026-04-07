@@ -193,6 +193,10 @@ def _validate_and_publish(message: dict, producer):
     if saga_id:
         result["saga_id"] = saga_id
 
+    # Mark sub-booking outcomes so notification-service can skip intermediate results.
+    # The saga coordinator publishes the definitive final outcome separately.
+    if saga_id:
+        result["is_sub_booking"] = True
     producer.send("booking-outcomes", result)
 
 
