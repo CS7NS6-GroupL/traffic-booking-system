@@ -176,6 +176,12 @@ async def _call_regional_route(region: str, origin: str, destination: str) -> di
                 status_code=422,
                 detail=f"No route from '{origin}' to '{destination}' in region '{region}'",
             )
+        if resp.status_code == 422:
+            body = resp.json()
+            if "same node" in body.get("detail", ""):
+                # Origin is already at the gateway node — return an empty leg
+                return {"segments": [], "total_km": 0, "origin": origin, "destination": destination}
+            raise HTTPException(status_code=422, detail=body.get("detail", "Route error"))
         resp.raise_for_status()
         return resp.json()
 
