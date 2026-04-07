@@ -1,0 +1,25 @@
+{
+  "name": "traffic-system",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "infra": "docker compose up -d",
+    "seed": "node scripts/seed.js",
+    "indexes": "node scripts/indexes.js",
+    "test-connections": "node scripts/test-connections.js",
+    "insert-booking": "node insertBooking.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^17.4.1",
+    "ioredis": "^5.10.1",
+    "mongodb": "^7.1.1"
+  }
+}
