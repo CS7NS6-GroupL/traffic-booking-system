@@ -16,7 +16,7 @@ redis = Redis.from_url(REDIS_URL, decode_responses=True)
 print("✅ Connected to MongoDB + Redis")
 
 # =========================
-# 🔹 Clear collections
+# 🔹 Clear Mongo collections
 # =========================
 db["regions"].delete_many({})
 db["region_graph"].delete_many({})
@@ -25,6 +25,22 @@ db["vehicles"].delete_many({})
 db["bookings"].delete_many({})
 db["audit_logs"].delete_many({})
 db["flags"].delete_many({})
+
+print("✅ Cleared Mongo collections")
+
+# =========================
+# 🔹 Clear Redis keys
+# =========================
+for key in redis.keys("capacity:*"):
+    redis.delete(key)
+
+for key in redis.keys("active:vehicle:*"):
+    redis.delete(key)
+
+for key in redis.keys("hold:*"):
+    redis.delete(key)
+
+print("✅ Cleared Redis capacity, active booking, and hold keys")
 
 # =========================
 # 🔹 Seed regions

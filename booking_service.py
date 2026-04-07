@@ -1,5 +1,5 @@
 import data_service
-from datetime import datetime
+from datetime import datetime, UTC
 
 def run_test_booking():
     request_id = f"req-{int(datetime.utcnow().timestamp())}"
