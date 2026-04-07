@@ -2,18 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install service dependencies
+# Install dependencies
 COPY services/booking-service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install shared auth dependencies
-COPY shared/requirements.txt /tmp/shared-req.txt
-RUN pip install --no-cache-dir -r /tmp/shared-req.txt
-
-# Copy shared library
-COPY shared/ /app/shared/
-
-# Copy service code
+# Copy service code only — no shared/ dependency (auth is inlined)
 COPY services/booking-service/ /app/
 
 ENV SERVICE_NAME=booking-service
