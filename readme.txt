@@ -1,72 +1,173 @@
-# Traffic System Setup
+# Data Service Usage (For Service Developers)
 
-## 1. Start Services
-```bash
-npm run infra
-```
+## Overview
 
-## 2. Setup Environment
-```bash
-cp .env.example .env
-```
+All services must interact with the database **only through `data_service.py`**.
 
-Ensure:
-```
-MONGO_URI=mongodb://localhost:27017/traffic_system
-REDIS_URL=redis://localhost:6379
-```
+Do **NOT** connect directly to:
 
-## 3. Test Connections
-```bash
-npm run test-connections
-```
+* MongoDB
+* Redis
 
-## 4. Seed Data
-```bash
-npm run seed
-```
+This ensures consistency, easier scaling, and supports distributed deployment.
 
-## 5. Create Indexes
-```bash
-npm run indexes
-```
+---
 
-## 6. Test Booking
-```bash
-npm run insert-booking
+## Architecture
+
+```
+Your Service (Journey / Booking / Authority)
+        ↓
+   data_service.py
+        ↓
+ Redis (fast state) + MongoDB (persistent)
 ```
 
 ---
 
-## Redis (Manual Check)
+## How to Use
+
+Import the data layer:
+
+```python
+import data_service
+```
+
+---
+
+## Core Functions
+
+### 1. Check Capacity
+
+```python
+data_service.get_capacity(region, slot)
+```
+
+Example:
+
+```python
+data_service.get_capacity("EUROPE", "2026-04-07T09:00")
+```
+
+---
+
+### 2. Reserve Capacity
+
+```python
+data_service.reserve_capacity(request_id, vehicle_id, region, slot)
+```
+
+Returns:
+
+```python
+{ "success": True, "remainingCapacity": 3 }
+```
+
+---
+
+### 3. Create Booking (MongoDB)
+
+```python
+data_service.create_booking(booking_dict)
+```
+
+Call **only after successful reservation**.
+
+---
+
+### 4. Get Vehicle Booking
+
+```python
+data_service.get_vehicle_booking(vehicle_id)
+```
+
+Used by:
+
+* validation service
+* traffic authority
+
+---
+
+### 5. Cancel Booking
+
+```python
+data_service.cancel_booking(vehicle_id, region, slot)
+```
+
+This will:
+
+* release Redis capacity
+* update MongoDB booking status
+* remove active booking cache
+
+---
+
+### 6. Publish Event (Notifications)
+
+```python
+data_service.publish_booking_event(event_dict)
+```
+
+---
+
+## Redis Key Structure (DO NOT CHANGE)
+
+```
+capacity:{REGION}:{SLOT}
+hold:{REQUEST_ID}:{REGION}
+active:vehicle:{VEHICLE_ID}
+```
+
+Example:
+
+```
+capacity:EUROPE:2026-04-07T09:00
+```
+
+---
+
+## Booking Flow (IMPORTANT)
+
+1. Check capacity
+2. Reserve capacity (Redis)
+3. Create booking (MongoDB)
+4. Cache active booking (Redis)
+5. Publish event
+
+---
+
+## Rules
+
+* ❌ Do NOT access Redis directly
+* ❌ Do NOT access MongoDB directly
+* ✅ Always use `data_service.py`
+* ✅ Keep region names consistent (`EUROPE`, `US`, etc.)
+
+---
+
+## Failure Behaviour
+
+* Redis = transient (can be lost)
+* MongoDB = source of truth
+
+If Redis data is missing:
+
+* system falls back to MongoDB where possible
+
+---
+
+## Setup (Quick)
 
 ```bash
-docker exec -it redis redis-cli
-```
-
-Examples:
-```
-GET capacity:EUROPE:2026-04-07T09:00
-GET active:vehicle:12D12345
+npm run infra
+python3 seed.py
 ```
 
 ---
 
 ## Notes
 
-- MongoDB = persistent data (bookings, users)
-- Redis = live state (capacity, holds)
-- Booking flow = Redis → MongoDB
+* This acts as the **data layer for all services**
+* Can later be replaced by a distributed service without changing your code
 
 ---
-
-## Reset
-
-```bash
-npm run seed
-```
-
-npm run test-connections
-npm run seed
-npm run indexes
-npm run insert-booking
