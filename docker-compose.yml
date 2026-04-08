@@ -131,9 +131,12 @@ services:
       - services/authority-service/.env
     environment:
       SERVICE_NAME: authority-service
+      DATA_SERVICE_URL: http://data-service:8009
     depends_on:
       mongo:
         condition: service_healthy
+      data-service:
+        condition: service_started
     networks:
       - traffic-net
 
@@ -156,6 +159,26 @@ services:
     networks:
       - traffic-net
 
+  # Data Service — single source of truth for all MongoDB/Redis access
+  data-service:
+    build:
+      context: .
+      dockerfile: services/data/Dockerfile
+    container_name: data-service
+    ports:
+      - "8009:8009"
+    environment:
+      SERVICE_NAME: data-service
+      MONGO_URI: mongodb://mongo:27017
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - traffic-net
+
   # Journey Management is global — it holds the region overlay graph and
   # coordinates cross-region sagas via Kafka.
   journey-management:
@@ -170,7 +193,7 @@ services:
     environment:
       SERVICE_NAME: journey-management
       REGION: laos
-      # Point each region to its own route-service instance
+      DATA_SERVICE_URL: http://data-service:8009
       ANDORRA_ROUTE_URL: http://route-service-andorra:8000
       LAOS_ROUTE_URL: http://route-service-laos:8000
       CAMBODIA_ROUTE_URL: http://route-service-cambodia:8000
@@ -181,6 +204,8 @@ services:
         condition: service_completed_successfully
       mongo:
         condition: service_healthy
+      data-service:
+        condition: service_started
     networks:
       - traffic-net
 
@@ -257,6 +282,7 @@ services:
     environment:
       SERVICE_NAME: validation-service-laos
       REGION: laos
+      DATA_SERVICE_URL: http://data-service:8009
     depends_on:
       kafka:
         condition: service_healthy
@@ -266,6 +292,8 @@ services:
         condition: service_healthy
       mongo:
         condition: service_healthy
+      data-service:
+        condition: service_started
     networks:
       - traffic-net
 
@@ -301,6 +329,7 @@ services:
     environment:
       SERVICE_NAME: validation-service-cambodia
       REGION: cambodia
+      DATA_SERVICE_URL: http://data-service:8009
     depends_on:
       kafka:
         condition: service_healthy
@@ -310,6 +339,8 @@ services:
         condition: service_healthy
       mongo:
         condition: service_healthy
+      data-service:
+        condition: service_started
     networks:
       - traffic-net
 
@@ -345,6 +376,7 @@ services:
     environment:
       SERVICE_NAME: validation-service-andorra
       REGION: andorra
+      DATA_SERVICE_URL: http://data-service:8009
     depends_on:
       kafka:
         condition: service_healthy
@@ -354,6 +386,8 @@ services:
         condition: service_healthy
       mongo:
         condition: service_healthy
+      data-service:
+        condition: service_started
     networks:
       - traffic-net
 

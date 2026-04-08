@@ -13,6 +13,9 @@ RUN pip install --no-cache-dir -r /tmp/shared-req.txt
 # Copy shared library
 COPY shared/ /app/shared/
 
+# Copy data service HTTP client (exposes same interface as data_service.py)
+COPY services/data/data_client.py /app/data/data_service.py
+
 # Copy service code
 COPY services/journey-management/ /app/
 

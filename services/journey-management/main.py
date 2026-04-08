@@ -315,8 +315,9 @@ def create_saga(req: SagaCreate, authorization: str = Header(...)):
     }
 
     try:
-        db = get_db()
-        db.sagas.insert_one({**saga_doc, "_id": saga_id})
+        import sys; sys.path.insert(0, "/app/data")
+        import data_service as ds
+        ds.create_saga(saga_doc)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"MongoDB unavailable: {exc}")
 
@@ -339,10 +340,7 @@ def create_saga(req: SagaCreate, authorization: str = Header(...)):
         producer.flush()
     except Exception as exc:
         try:
-            get_db().sagas.update_one(
-                {"saga_id": saga_id},
-                {"$set": {"status": "ABORTED", "abort_reason": str(exc)}},
-            )
+            ds.update_saga_status(saga_id, "ABORTED", {"abort_reason": str(exc)})
         except Exception:
             pass
         raise HTTPException(status_code=503, detail=f"Kafka unavailable: {exc}")
@@ -351,16 +349,18 @@ def create_saga(req: SagaCreate, authorization: str = Header(...)):
 
 
 @app.get("/sagas/{saga_id}")
-def get_saga(saga_id: str, authorization: str = Header(...)):
+def get_saga_endpoint(saga_id: str, authorization: str = Header(...)):
     """Return current state of a cross-region saga."""
     _verify(authorization)
     try:
-        db = get_db()
-        saga = db.sagas.find_one({"saga_id": saga_id}, {"_id": 0})
+        import sys; sys.path.insert(0, "/app/data")
+        import data_service as ds
+        saga = ds.get_saga(saga_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"MongoDB unavailable: {exc}")
     if not saga:
         raise HTTPException(status_code=404, detail="Saga not found")
+    saga.pop("_id", None)
     return saga
 
 
@@ -369,28 +369,26 @@ def _advance_saga(saga_id: str, region: str, outcome: str, reason: str):
     Called by the Kafka consumer when a regional sub-booking outcome arrives.
     Advances the saga state machine and triggers compensation if needed.
     """
+    import sys; sys.path.insert(0, "/app/data")
+    import data_service as ds
+
     try:
-        db = get_db()
-        saga = db.sagas.find_one({"saga_id": saga_id})
+        saga = ds.get_saga(saga_id)
         if not saga or saga["status"] not in ("PENDING", "ABORTING"):
             return
 
-        db.sagas.update_one(
-            {"saga_id": saga_id},
-            {"$set": {f"regional_outcomes.{region}": {"outcome": outcome, "reason": reason}}},
-        )
-        saga = db.sagas.find_one({"saga_id": saga_id})
+        saga = ds.update_saga_regional_outcome(saga_id, region, outcome, reason)
         outcomes = saga.get("regional_outcomes", {})
         regions_involved = saga["regions_involved"]
 
         if not all(r in outcomes for r in regions_involved):
-            return  # still waiting
+            return  # still waiting for other regions
 
         any_rejected = any(o["outcome"] == "REJECTED" for o in outcomes.values())
         producer = _kafka_producer()
 
         if any_rejected:
-            db.sagas.update_one({"saga_id": saga_id}, {"$set": {"status": "ABORTING"}})
+            ds.update_saga_status(saga_id, "ABORTING")
             for r, o in outcomes.items():
                 if o["outcome"] == "APPROVED":
                     producer.send("capacity-releases", {
@@ -402,7 +400,7 @@ def _advance_saga(saga_id: str, region: str, outcome: str, reason: str):
                         "segments":      saga["segments_by_region"].get(r, []),
                     })
             producer.flush()
-            db.sagas.update_one({"saga_id": saga_id}, {"$set": {"status": "ABORTED"}})
+            ds.update_saga_status(saga_id, "ABORTED")
             producer.send("booking-outcomes", {
                 "booking_id":        saga["booking_id"],
                 "saga_id":           saga_id,
@@ -412,7 +410,7 @@ def _advance_saga(saga_id: str, region: str, outcome: str, reason: str):
                 "regional_outcomes": outcomes,
             })
         else:
-            db.bookings.insert_one({
+            ds.insert_booking({
                 "booking_id":       saga["booking_id"],
                 "saga_id":          saga_id,
                 "driver_id":        saga["driver_id"],
@@ -424,7 +422,7 @@ def _advance_saga(saga_id: str, region: str, outcome: str, reason: str):
                 "status":           "approved",
                 "created_at":       datetime.utcnow().isoformat(),
             })
-            db.sagas.update_one({"saga_id": saga_id}, {"$set": {"status": "COMMITTED"}})
+            ds.update_saga_status(saga_id, "COMMITTED")
             producer.send("booking-outcomes", {
                 "booking_id":        saga["booking_id"],
                 "saga_id":           saga_id,
@@ -473,10 +471,11 @@ def list_journeys(authorization: str = Header(...)):
     payload = _verify(authorization)
     driver_id = payload.get("sub")
     try:
-        db = get_db()
-        bookings = list(db.bookings.find({"driver_id": driver_id}, {"_id": 0}))
+        import sys; sys.path.insert(0, "/app/data")
+        import data_service as ds
+        bookings = ds.get_bookings_by_driver(driver_id)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"MongoDB unavailable: {exc}")
+        raise HTTPException(status_code=503, detail=f"Data service unavailable: {exc}")
     return {"driver_id": driver_id, "bookings": bookings, "region": REGION}
 
 
@@ -484,10 +483,11 @@ def list_journeys(authorization: str = Header(...)):
 def get_journey(booking_id: str, authorization: str = Header(...)):
     _verify(authorization)
     try:
-        db = get_db()
-        booking = db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
+        import sys; sys.path.insert(0, "/app/data")
+        import data_service as ds
+        booking = ds.get_booking_by_id(booking_id)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"MongoDB unavailable: {exc}")
+        raise HTTPException(status_code=503, detail=f"Data service unavailable: {exc}")
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
     return booking
@@ -502,23 +502,21 @@ def cancel_journey(booking_id: str, authorization: str = Header(...)):
     decrements its own Redis counter.
     """
     payload = _verify(authorization)
+    import sys; sys.path.insert(0, "/app/data")
+    import data_service as ds
     try:
-        db = get_db()
-        booking = db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
+        booking = ds.get_booking_by_id(booking_id)
         if not booking:
             raise HTTPException(status_code=404, detail="Booking not found")
         if booking.get("driver_id") != payload.get("sub"):
             raise HTTPException(status_code=403, detail="Not your booking")
         if booking.get("status") == "cancelled":
             raise HTTPException(status_code=409, detail="Already cancelled")
-        db.bookings.update_one(
-            {"booking_id": booking_id},
-            {"$set": {"status": "cancelled", "cancelled_at": datetime.utcnow().isoformat()}},
-        )
+        ds.cancel_booking_record(booking_id, datetime.utcnow().isoformat())
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"MongoDB unavailable: {exc}")
+        raise HTTPException(status_code=503, detail=f"Data service unavailable: {exc}")
 
     try:
         producer = _kafka_producer()
@@ -526,8 +524,7 @@ def cancel_journey(booking_id: str, authorization: str = Header(...)):
         regions = booking.get("regions_involved", [REGION])
 
         if saga_id:
-            db = get_db()
-            saga = db.sagas.find_one({"saga_id": saga_id}) or {}
+            saga = ds.get_saga(saga_id) or {}
             segments_by_region = saga.get("segments_by_region", {})
             for r in regions:
                 producer.send("capacity-releases", {

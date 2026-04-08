@@ -1,351 +1,273 @@
+"""
+Data Service — business logic layer.
+All Redis and MongoDB access lives here.
+Imported directly by main.py (the HTTP wrapper).
+"""
 import os
 import json
 from datetime import datetime, UTC
 from dotenv import load_dotenv
 from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 from redis import Redis
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
+import logging
 
-# =========================
-# 🔹 Setup
-# =========================
+log = logging.getLogger(__name__)
+
+# Retry on any pymongo connection/network error.
+# 3 attempts: immediate, ~1s, ~2s — total max wait ~3s before giving up.
+_mongo_retry = retry(
+    retry=retry_if_exception_type((ConnectionFailure, ServerSelectionTimeoutError)),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    before_sleep=before_sleep_log(log, logging.WARNING),
+    reraise=True,
+)
+
 load_dotenv()
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/traffic_system")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+LOCK_TTL  = 10  # seconds
 
 mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["traffic_system"]
-
-bookings = db["bookings"]
-regions_collection = db["regions"]
-region_graph_collection = db["region_graph"]
-audit_logs = db["audit_logs"]
-flags = db["flags"]
-
+db           = mongo_client["traffic"]
 redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
 
 
 def now_utc_iso() -> str:
-    """Return a timezone-aware UTC ISO timestamp."""
     return datetime.now(UTC).isoformat()
 
 
-# =========================
-# 🔹 Key helpers
-# =========================
-def capacity_key(region: str, slot: str) -> str:
-    """Return the Redis key for live remaining capacity."""
-    return f"capacity:{region}:{slot}"
+# =============================================================================
+# Redis health
+# =============================================================================
 
-
-def hold_key(request_id: str, region: str) -> str:
-    """Return the Redis key for a temporary regional hold."""
-    return f"hold:{request_id}:{region}"
-
-
-def active_booking_key(vehicle_id: str) -> str:
-    """Return the Redis key for an active vehicle booking cache entry."""
-    return f"active:vehicle:{vehicle_id}"
-
-
-# =========================
-# 🔹 Health / availability
-# =========================
 def redis_available() -> bool:
-    """Return True if Redis is reachable."""
     try:
         return bool(redis_client.ping())
     except Exception:
         return False
 
 
-# =========================
-# 🔹 Region / config helpers
-# =========================
-def get_region(region_id: str):
-    """Return a region document from MongoDB."""
-    return regions_collection.find_one({"regionId": region_id})
+# =============================================================================
+# Segment keys
+# Key structure (shared across all services via this module):
+#   lock:segment:{from}:{to}      — distributed mutex, TTL=10s
+#   capacity:segment:{from}:{to}  — max vehicles allowed (default 100)
+#   current:segment:{from}:{to}   — current vehicle count
+# =============================================================================
+
+def _lock_key(f: str, t: str) -> str:
+    return f"lock:segment:{f}:{t}"
+
+def _capacity_key(f: str, t: str) -> str:
+    return f"capacity:segment:{f}:{t}"
+
+def _current_key(f: str, t: str) -> str:
+    return f"current:segment:{f}:{t}"
 
 
-def get_all_regions():
-    """Return all region documents from MongoDB."""
-    return list(regions_collection.find({}))
+def acquire_segment_lock(from_node: str, to_node: str, ttl: int = LOCK_TTL) -> bool:
+    return bool(redis_client.set(_lock_key(from_node, to_node), "1", nx=True, ex=ttl))
+
+def release_segment_lock(from_node: str, to_node: str):
+    redis_client.delete(_lock_key(from_node, to_node))
+
+def get_segment_capacity(from_node: str, to_node: str) -> int:
+    val = redis_client.get(_capacity_key(from_node, to_node))
+    return int(val) if val is not None else 100
+
+def get_segment_current(from_node: str, to_node: str) -> int:
+    val = redis_client.get(_current_key(from_node, to_node))
+    return int(val) if val is not None else 0
+
+def increment_segment_current(from_node: str, to_node: str):
+    redis_client.incr(_current_key(from_node, to_node))
+
+def decrement_segment_current(from_node: str, to_node: str):
+    if get_segment_current(from_node, to_node) > 0:
+        redis_client.decr(_current_key(from_node, to_node))
 
 
-def get_region_graph(region_id: str):
-    """Return the routing/graph document for a region."""
-    return region_graph_collection.find_one({"regionId": region_id})
+# =============================================================================
+# Batched segment validation
+# Called once per booking — acquires locks, checks capacity, checks duplicate,
+# increments counters, releases locks. All in one call to avoid chatty HTTP.
+# =============================================================================
 
-
-def get_neighbors(region_id: str):
-    """Return neighbor regions for a given region."""
-    region = get_region_graph(region_id)
-    return region["neighbors"] if region and "neighbors" in region else []
-
-
-# =========================
-# 🔹 Capacity
-# =========================
-def get_capacity(region: str, slot: str):
-    """Return remaining capacity for a region and slot from Redis."""
-    value = redis_client.get(capacity_key(region, slot))
-    return None if value is None else int(value)
-
-
-def get_hold(request_id: str, region: str):
-    """Return the hold payload for a request/region pair, if it exists."""
-    value = redis_client.get(hold_key(request_id, region))
-    return None if value is None else json.loads(value)
-
-
-def reserve_capacity(request_id: str, vehicle_id: str, region: str, slot: str, ttl: int = 30):
+def validate_and_reserve(segments: list[dict], vehicle_id: str) -> dict:
     """
-    Reserve one unit of capacity for a region/slot and create a temporary hold.
-    Prevents duplicate active bookings for the same vehicle.
+    Full validation pass for a booking:
+      1. Acquire all segment locks (sorted to prevent deadlock).
+      2. Check capacity on every segment.
+      3. Check for a duplicate active booking on the same vehicle.
+      4. Increment counters on all segments.
+      5. Release all locks.
+    Returns {"outcome": "APPROVED"|"REJECTED", "reason": str}.
     """
-    if redis_client.get(active_booking_key(vehicle_id)):
-        return {"success": False, "error": "Vehicle already booked"}
+    sorted_segs = sorted(segments, key=lambda s: _lock_key(s["from"], s["to"]))
+    acquired: list[tuple[str, str]] = []
 
-    cap = redis_client.get(capacity_key(region, slot))
-    if cap is None:
-        return {"success": False, "error": "Capacity not set"}
+    try:
+        for seg in sorted_segs:
+            if not acquire_segment_lock(seg["from"], seg["to"]):
+                return {
+                    "outcome": "REJECTED",
+                    "reason":  f"Segment lock contention on {seg['from']}->{seg['to']} — please retry",
+                }
+            acquired.append((seg["from"], seg["to"]))
 
-    if int(cap) <= 0:
-        return {"success": False, "error": "No capacity"}
+        for seg in sorted_segs:
+            cap = get_segment_capacity(seg["from"], seg["to"])
+            cur = get_segment_current(seg["from"], seg["to"])
+            if cur >= cap:
+                return {
+                    "outcome": "REJECTED",
+                    "reason":  f"Road segment {seg['from']}->{seg['to']} at full capacity ({cur}/{cap})",
+                }
 
-    remaining = redis_client.decr(capacity_key(region, slot))
-
-    if remaining < 0:
-        redis_client.incr(capacity_key(region, slot))
-        return {"success": False, "error": "No capacity"}
-
-    hold = {
-        "requestId": request_id,
-        "vehicleId": vehicle_id,
-        "region": region,
-        "slot": slot,
-        "createdAt": now_utc_iso()
-    }
-
-    redis_client.set(
-        hold_key(request_id, region),
-        json.dumps(hold),
-        ex=ttl
-    )
-
-    return {"success": True, "remainingCapacity": remaining}
-
-
-def release_capacity(request_id: str, region: str, slot: str):
-    """Release a temporary hold and return one unit of capacity."""
-    if not redis_client.get(hold_key(request_id, region)):
-        return {"success": False, "error": "Hold not found"}
-
-    redis_client.incr(capacity_key(region, slot))
-    redis_client.delete(hold_key(request_id, region))
-
-    return {"success": True}
-
-
-def reserve_multi_region(request_id: str, vehicle_id: str, regions: list[str], slot: str, ttl: int = 30):
-    """
-    Attempt to reserve capacity across multiple regions.
-    On failure, rolls back all successful earlier reservations.
-    """
-    reserved_regions = []
-
-    for region in regions:
-        result = reserve_capacity(request_id, vehicle_id, region, slot, ttl)
-        if not result["success"]:
-            for reserved_region in reserved_regions:
-                release_capacity(request_id, reserved_region, slot)
+        if get_vehicle_booking_fallback(vehicle_id):
             return {
-                "success": False,
-                "error": f"Failed to reserve in region {region}",
-                "failedRegion": region
+                "outcome": "REJECTED",
+                "reason":  f"Vehicle {vehicle_id} already has an active booking",
             }
 
-        reserved_regions.append(region)
+        for seg in sorted_segs:
+            increment_segment_current(seg["from"], seg["to"])
 
-    return {"success": True, "regions": reserved_regions}
+        return {"outcome": "APPROVED", "reason": "Booking approved"}
 
-
-# =========================
-# 🔹 Booking
-# =========================
-def create_booking(booking: dict):
-    """Insert a confirmed booking into MongoDB."""
-    result = bookings.insert_one(booking)
-    return str(result.inserted_id)
-
-
-def cache_active_booking(booking: dict):
-    """Cache an active booking in Redis for fast lookup."""
-    redis_client.set(
-        active_booking_key(booking["vehicleId"]),
-        json.dumps(booking, default=str)
-    )
+    finally:
+        for fn, tn in reversed(acquired):
+            try:
+                release_segment_lock(fn, tn)
+            except Exception:
+                pass
 
 
-def clear_active_booking(vehicle_id: str):
-    """Remove an active booking cache entry from Redis."""
-    redis_client.delete(active_booking_key(vehicle_id))
+def release_segments(segments: list[dict]):
+    """Decrement counters for a list of segments (cancellation / saga rollback)."""
+    for seg in segments:
+        decrement_segment_current(seg["from"], seg["to"])
 
 
+# =============================================================================
+# Booking (MongoDB)
+# =============================================================================
+
+@_mongo_retry
 def get_vehicle_booking(vehicle_id: str):
-    """
-    Get vehicle booking, preferring Redis cache first,
-    then falling back to MongoDB.
-    """
-    cached = redis_client.get(active_booking_key(vehicle_id))
+    cached = redis_client.get(f"active:vehicle:{vehicle_id}")
     if cached:
-        return {
-            "source": "redis",
-            "booking": json.loads(cached)
-        }
-
-    booking = bookings.find_one({
-        "vehicleId": vehicle_id,
-        "status": "confirmed"
-    })
-
-    if not booking:
-        return None
-
-    booking["_id"] = str(booking["_id"])
-
-    return {
-        "source": "mongodb",
-        "booking": booking
-    }
+        return {"source": "redis", "booking": json.loads(cached)}
+    booking = db.bookings.find_one(
+        {"vehicle_id": vehicle_id, "status": {"$in": ["approved", "pending"]}},
+        {"_id": 0},
+    )
+    return {"source": "mongodb", "booking": booking} if booking else None
 
 
 def get_vehicle_booking_fallback(vehicle_id: str):
-    """
-    Try Redis-backed lookup first; if Redis is unavailable,
-    fall back directly to MongoDB.
-    """
     try:
         return get_vehicle_booking(vehicle_id)
     except Exception:
-        booking = bookings.find_one({
-            "vehicleId": vehicle_id,
-            "status": "confirmed"
-        })
-
-        if not booking:
-            return None
-
-        booking["_id"] = str(booking["_id"])
-
-        return {
-            "source": "mongodb-fallback",
-            "booking": booking
-        }
+        # MongoDB exhausted retries — return None rather than crashing validation
+        log.error("MongoDB unavailable for vehicle booking lookup — treating as no active booking")
+        return None
 
 
-def get_confirmed_bookings():
-    """Return all confirmed bookings from MongoDB."""
-    results = []
-    for booking in bookings.find({"status": "confirmed"}):
-        booking["_id"] = str(booking["_id"])
-        results.append(booking)
-    return results
+@_mongo_retry
+def insert_booking(booking_doc: dict):
+    db.bookings.insert_one({k: v for k, v in booking_doc.items() if k != "_id"})
 
 
-def get_region_bookings(region: str):
-    """Return all confirmed bookings for a region."""
-    results = []
-    for booking in bookings.find({"region": region, "status": "confirmed"}):
-        booking["_id"] = str(booking["_id"])
-        results.append(booking)
-    return results
+@_mongo_retry
+def get_booking_by_id(booking_id: str) -> dict | None:
+    return db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
 
 
-def cancel_booking(vehicle_id: str, region: str = None, slot: str = None):
-    """
-    Cancel the current confirmed booking for a vehicle,
-    restore capacity, clear Redis cache, and publish an event.
-    """
-    booking = bookings.find_one({
-        "vehicleId": vehicle_id,
-        "status": "confirmed"
-    })
+@_mongo_retry
+def get_bookings_by_vehicle(vehicle_id: str) -> list:
+    return list(db.bookings.find({"vehicle_id": vehicle_id}, {"_id": 0}))
 
-    if not booking:
-        return {"success": False, "error": "No booking"}
 
-    bookings.update_one(
-        {"_id": booking["_id"]},
-        {
-            "$set": {
-                "status": "cancelled",
-                "updatedAt": now_utc_iso()
-            }
-        }
+@_mongo_retry
+def get_bookings_by_driver(driver_id: str) -> list:
+    return list(db.bookings.find({"driver_id": driver_id}, {"_id": 0}))
+
+
+@_mongo_retry
+def get_all_bookings(limit: int = 50) -> list:
+    return list(db.bookings.find({}, {"_id": 0}).sort("created_at", -1).limit(limit))
+
+
+@_mongo_retry
+def cancel_booking_record(booking_id: str, cancelled_at: str):
+    db.bookings.update_one(
+        {"booking_id": booking_id},
+        {"$set": {"status": "cancelled", "cancelled_at": cancelled_at}},
     )
 
-    if region and slot:
-        redis_client.incr(capacity_key(region, slot))
 
-    clear_active_booking(vehicle_id)
+# =============================================================================
+# Saga (MongoDB)
+# =============================================================================
 
-    redis_client.publish("booking-events", json.dumps({
-        "type": "booking_cancelled",
-        "vehicleId": vehicle_id,
-        "bookingId": booking["bookingId"]
-    }))
-
-    return {
-        "success": True,
-        "bookingId": booking["bookingId"]
-    }
+@_mongo_retry
+def create_saga(saga_doc: dict):
+    db.sagas.insert_one({**saga_doc, "_id": saga_doc["saga_id"]})
 
 
-# =========================
-# 🔹 Audit / flags
-# =========================
+@_mongo_retry
+def get_saga(saga_id: str) -> dict | None:
+    return db.sagas.find_one({"saga_id": saga_id})
+
+
+@_mongo_retry
+def update_saga_regional_outcome(saga_id: str, region: str, outcome: str, reason: str) -> dict | None:
+    db.sagas.update_one(
+        {"saga_id": saga_id},
+        {"$set": {f"regional_outcomes.{region}": {"outcome": outcome, "reason": reason}}},
+    )
+    return get_saga(saga_id)
+
+
+@_mongo_retry
+def update_saga_status(saga_id: str, status: str, extra: dict = None):
+    update = {"status": status}
+    if extra:
+        update.update(extra)
+    db.sagas.update_one({"saga_id": saga_id}, {"$set": update})
+
+
+# =============================================================================
+# Flags and audit (MongoDB)
+# =============================================================================
+
+@_mongo_retry
+def insert_flag(booking_id: str, reason: str, region: str):
+    db.flags.insert_one({
+        "booking_id": booking_id,
+        "reason":     reason,
+        "flagged_at": now_utc_iso(),
+        "region":     region,
+    })
+
+
+@_mongo_retry
 def log_audit_event(action: str, actor_id: str, actor_role: str, details: dict):
-    """Write an audit event to MongoDB."""
-    result = audit_logs.insert_one({
+    db.audit_logs.insert_one({
         "timestamp": now_utc_iso(),
-        "action": action,
-        "actorId": actor_id,
+        "action":    action,
+        "actorId":   actor_id,
         "actorRole": actor_role,
-        "details": details
+        "details":   details,
     })
-    return str(result.inserted_id)
-
-
-def flag_vehicle(vehicle_id: str, flagged_by: str, reason: str):
-    """Record a suspicious or invalid vehicle/booking flag."""
-    result = flags.insert_one({
-        "vehicleId": vehicle_id,
-        "flaggedBy": flagged_by,
-        "reason": reason,
-        "createdAt": now_utc_iso()
-    })
-    return str(result.inserted_id)
-
-
-# =========================
-# 🔹 Events
-# =========================
-def publish_booking_event(event: dict):
-    """Publish a booking-related event on Redis Pub/Sub."""
-    return redis_client.publish("booking-events", json.dumps(event, default=str))
-
-
-# =========================
-# 🔹 Rollback
-# =========================
-def rollback_reservation(request_id: str, region: str, slot: str, vehicle_id: str = None):
-    """Best-effort rollback of Redis reservation state."""
-    try:
-        redis_client.incr(capacity_key(region, slot))
-        redis_client.delete(hold_key(request_id, region))
-
-        if vehicle_id:
-            clear_active_booking(vehicle_id)
-    except Exception as e:
-        print("Rollback failed:", e)

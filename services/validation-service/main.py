@@ -19,7 +19,10 @@ is cancelled or a saga is aborted. This is the compensating transaction.
 
 import json
 import os
+import sys
 import threading
+
+sys.path.insert(0, "/app/data")
 
 from fastapi import FastAPI
 
@@ -28,24 +31,10 @@ app = FastAPI(title="Validation Service")
 SERVICE_NAME = os.getenv("SERVICE_NAME", "validation-service")
 REGION = os.getenv("REGION", "local")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-LOCK_TTL = 10  # seconds
+from datetime import datetime, UTC
 
-ROAD_TYPE_CAPACITY = {
-    "motorway": 500,
-    "motorway_link": 500,
-    "trunk": 400,
-    "trunk_link": 400,
-    "primary": 300,
-    "primary_link": 300,
-    "secondary": 200,
-    "secondary_link": 200,
-    "tertiary": 150,
-    "tertiary_link": 150,
-    "unclassified": 100,
-    "residential": 100,
-}
+def now_utc_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def _message_segments(message: dict) -> list[dict]:
@@ -68,14 +57,6 @@ def _message_segments(message: dict) -> list[dict]:
     return []
 
 
-def _segment_keys(origin: str, destination: str) -> tuple[str, str, str]:
-    segment_key = f"segment:{origin}:{destination}"
-    return (
-        f"lock:{segment_key}",
-        f"capacity:{segment_key}",
-        f"current:{segment_key}",
-    )
-
 
 @app.get("/health")
 def health():
@@ -89,95 +70,32 @@ def status():
 
 def _validate_and_publish(message: dict, producer):
     """Validate one booking (or sub-booking) and publish the outcome."""
-    import redis as redis_lib
-    from pymongo import MongoClient
+    import data_service as ds
 
     booking_id = message.get("booking_id", "unknown")
-    saga_id = message.get("saga_id")
+    saga_id    = message.get("saga_id")
     vehicle_id = message.get("vehicle_id")
-    normalized_segments = _message_segments(message)
-    origin = normalized_segments[0]["from"] if normalized_segments else message.get("origin")
-    destination = normalized_segments[-1]["to"] if normalized_segments else message.get("destination")
-
-    r = redis_lib.from_url(REDIS_URL)
-    outcome = "REJECTED"
-    reason = "Unknown error"
-    acquired_locks = []
+    segments   = _message_segments(message)
+    origin      = segments[0]["from"] if segments else message.get("origin")
+    destination = segments[-1]["to"]  if segments else message.get("destination")
 
     try:
-        if not normalized_segments:
-            reason = "Booking contains no valid segments"
+        if not segments:
+            outcome = "REJECTED"
+            reason  = "Booking contains no valid segments"
         else:
-            segment_states = sorted(
-                [
-                    {
-                        "origin": seg["from"],
-                        "destination": seg["to"],
-                        "keys": _segment_keys(seg["from"], seg["to"]),
-                    }
-                    for seg in normalized_segments
-                ],
-                key=lambda item: item["keys"][0],
-            )
-
-            for state in segment_states:
-                lock_key = state["keys"][0]
-                acquired = r.set(lock_key, "1", nx=True, ex=LOCK_TTL)
-                if not acquired:
-                    reason = (
-                        f"Segment lock contention on "
-                        f"{state['origin']}->{state['destination']} - please retry"
-                    )
-                    break
-                acquired_locks.append(lock_key)
-            else:
-                current_keys = []
-                for state in segment_states:
-                    _, capacity_key, current_key = state["keys"]
-                    capacity = int(r.get(capacity_key) or 100)
-                    current = int(r.get(current_key) or 0)
-                    if current >= capacity:
-                        reason = (
-                            f"Road segment {state['origin']}->{state['destination']} "
-                            f"at full capacity ({current}/{capacity})"
-                        )
-                        break
-                    current_keys.append(current_key)
-                else:
-                    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
-                    try:
-                        db = client["traffic"]
-                        existing = db.bookings.find_one(
-                            {
-                                "vehicle_id": vehicle_id,
-                                "status": {"$in": ["approved", "pending"]},
-                            }
-                        )
-                        if existing:
-                            reason = f"Vehicle {vehicle_id} already has an active booking"
-                        else:
-                            for current_key in current_keys:
-                                r.incr(current_key)
-                            if not saga_id:
-                                db.bookings.insert_one(
-                                    {
-                                        **{k: v for k, v in message.items() if k != "_id"},
-                                        "status": "approved",
-                                        "approved_at": __import__("datetime").datetime.utcnow().isoformat(),
-                                    }
-                                )
-                            outcome = "APPROVED"
-                            reason = "Booking approved"
-                    finally:
-                        client.close()
+            result  = ds.validate_and_reserve(segments, vehicle_id)
+            outcome = result["outcome"]
+            reason  = result["reason"]
+            if outcome == "APPROVED" and not saga_id:
+                ds.insert_booking({
+                    **{k: v for k, v in message.items() if k != "_id"},
+                    "status":      "approved",
+                    "approved_at": now_utc_iso(),
+                })
     except Exception as exc:
-        reason = f"Internal validation error: {exc}"
-    finally:
-        for lock_key in reversed(acquired_locks):
-            try:
-                r.delete(lock_key)
-            except Exception:
-                pass
+        outcome = "REJECTED"
+        reason  = f"Internal validation error: {exc}"
 
     result = {
         "booking_id": booking_id,
@@ -201,19 +119,12 @@ def _validate_and_publish(message: dict, producer):
 
 
 def _release_capacity(message: dict):
-    """Decrement Redis counters when a booking is cancelled or saga is aborted."""
+    """Decrement counters when a booking is cancelled or saga is aborted."""
     target_region = message.get("target_region", message.get("region", REGION))
     if target_region != REGION:
         return
-
-    import redis as redis_lib
-
-    r = redis_lib.from_url(REDIS_URL)
-    for seg in _message_segments(message):
-        current_key = _segment_keys(seg["from"], seg["to"])[2]
-        current = int(r.get(current_key) or 0)
-        if current > 0:
-            r.decr(current_key)
+    import data_service as ds
+    ds.release_segments(_message_segments(message))
 
 
 def _booking_consumer_loop():
