@@ -174,19 +174,22 @@ def _nearest_node(lat: float, lng: float) -> str:
 
 def _resolve(place: str) -> str:
     """
-    Resolve a place name or OSM node ID to a node ID in this region's graph.
+    Resolve a place name or node ID to a node ID in this region's graph.
 
-    Numeric string  → treated as OSM node ID directly (used by journey-management
-                      when requesting legs that end at a gateway node).
+    Known node ID   → returned directly if it exists in node_coords (works for
+                      both numeric OSM IDs and custom string IDs like 'border-laos-camb').
+    Numeric string  → treated as OSM node ID; 404 if not in graph.
     Anything else   → geocoded with Nominatim, then snapped to nearest graph node.
     """
-    if place.lstrip("-").isdigit():
-        if place not in node_coords:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Node ID '{place}' not found in region '{REGION}'"
-            )
+    # Direct match — covers custom string IDs (e.g. "border-laos-camb")
+    if place in node_coords:
         return place
+
+    if place.lstrip("-").isdigit():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Node ID '{place}' not found in region '{REGION}'"
+        )
 
     try:
         location = _geocoder.geocode(place, timeout=10)
