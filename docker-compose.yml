@@ -1,7 +1,14 @@
 version: "3.9"
 
 # CS7NS6 — Traffic Booking System
-# Brings up all 8 microservices + Kafka + Zookeeper + Redis + MongoDB
+# Brings up all application services across 3 regions + shared infrastructure.
+#
+# Regions and imported OSM data:
+#   andorra  — Andorra (isolated micro-state)
+#   laos     — Laos
+#   cambodia — Cambodia
+#
+# Cross-region saga demo: Laos ↔ Cambodia via Voen Kham / Don Kralor border crossing.
 
 networks:
   traffic-net:
@@ -45,6 +52,7 @@ services:
       timeout: 10s
       retries: 10
 
+  # Creates all Kafka topics before any service starts consuming or producing.
   kafka-init:
     image: confluentinc/cp-kafka:7.5.0
     depends_on:
@@ -55,7 +63,8 @@ services:
         kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 --topic booking-requests  --partitions 3 --replication-factor 1 &&
         kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 --topic booking-outcomes  --partitions 3 --replication-factor 1 &&
         kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 --topic capacity-releases --partitions 1 --replication-factor 1 &&
-        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 --topic notifications    --partitions 3 --replication-factor 1
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 --topic notifications    --partitions 3 --replication-factor 1 &&
+        echo 'Kafka topics created.'
       "
     networks:
       - traffic-net
@@ -92,29 +101,7 @@ services:
       timeout: 10s
       retries: 5
 
-  # ── Application Services ────────────────────────────────────────────────────
-
-  booking-service:
-    build:
-      context: .
-      dockerfile: services/booking-service/Dockerfile
-    container_name: booking-service
-    ports:
-      - "8001:8000"
-    env_file:
-      - services/booking-service/.env
-    environment:
-      SERVICE_NAME: booking-service
-      JOURNEY_MANAGEMENT_URL: http://journey-management:8000
-    depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      mongo:
-        condition: service_healthy
-    networks:
-      - traffic-net
+  # ── Global services (not region-specific) ───────────────────────────────────
 
   user-registry:
     build:
@@ -128,10 +115,6 @@ services:
     environment:
       SERVICE_NAME: user-registry
     depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
       mongo:
         condition: service_healthy
     networks:
@@ -148,69 +131,6 @@ services:
       - services/authority-service/.env
     environment:
       SERVICE_NAME: authority-service
-    depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      mongo:
-        condition: service_healthy
-    networks:
-      - traffic-net
-
-  data-gateway:
-    build:
-      context: .
-      dockerfile: services/data-gateway/Dockerfile
-    container_name: data-gateway
-    ports:
-      - "8004:8000"
-    env_file:
-      - services/data-gateway/.env
-    environment:
-      SERVICE_NAME: data-gateway
-    depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      mongo:
-        condition: service_healthy
-    networks:
-      - traffic-net
-
-  validation-service:
-    build:
-      context: .
-      dockerfile: services/validation-service/Dockerfile
-    container_name: validation-service
-    ports:
-      - "8005:8000"
-    env_file:
-      - services/validation-service/.env
-    environment:
-      SERVICE_NAME: validation-service
-    depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      mongo:
-        condition: service_healthy
-    networks:
-      - traffic-net
-
-  route-service:
-    build:
-      context: .
-      dockerfile: services/route-service/Dockerfile
-    container_name: route-service
-    ports:
-      - "8006:8000"
-    env_file:
-      - services/route-service/.env
-    environment:
-      SERVICE_NAME: route-service
     depends_on:
       mongo:
         condition: service_healthy
@@ -231,13 +151,13 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-      mongo:
-        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
     networks:
       - traffic-net
 
+  # Journey Management is global — it holds the region overlay graph and
+  # coordinates cross-region sagas via Kafka.
   journey-management:
     build:
       context: .
@@ -249,15 +169,195 @@ services:
       - services/journey-management/.env
     environment:
       SERVICE_NAME: journey-management
+      REGION: laos
+      # Point each region to its own route-service instance
+      ANDORRA_ROUTE_URL: http://route-service-andorra:8000
+      LAOS_ROUTE_URL: http://route-service-laos:8000
+      CAMBODIA_ROUTE_URL: http://route-service-cambodia:8000
     depends_on:
       kafka:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      mongo:
+        condition: service_healthy
+    networks:
+      - traffic-net
+
+  data-gateway:
+    build:
+      context: .
+      dockerfile: services/data-gateway/Dockerfile
+    container_name: data-gateway
+    ports:
+      - "8004:8000"
+    env_file:
+      - services/data-gateway/.env
+    environment:
+      SERVICE_NAME: data-gateway
+      REGION: laos
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - traffic-net
+
+  # ── Laos cluster ────────────────────────────────────────────────────────────
+
+  booking-service:
+    build:
+      context: .
+      dockerfile: services/booking-service/Dockerfile
+    container_name: booking-service
+    ports:
+      - "8001:8000"
+    env_file:
+      - services/booking-service/.env
+    environment:
+      SERVICE_NAME: booking-service
+      REGION: laos
+      JOURNEY_MANAGEMENT_URL: http://journey-management:8000
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      mongo:
+        condition: service_healthy
+    networks:
+      - traffic-net
+
+  route-service-laos:
+    build:
+      context: .
+      dockerfile: services/route-service/Dockerfile
+    container_name: route-service-laos
+    ports:
+      - "8006:8000"
+    env_file:
+      - services/route-service/.env
+    environment:
+      SERVICE_NAME: route-service-laos
+      REGION: laos
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - traffic-net
+
+  validation-service-laos:
+    build:
+      context: .
+      dockerfile: services/validation-service/Dockerfile
+    container_name: validation-service-laos
+    ports:
+      - "8005:8000"
+    env_file:
+      - services/validation-service/.env
+    environment:
+      SERVICE_NAME: validation-service-laos
+      REGION: laos
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       mongo:
         condition: service_healthy
     networks:
       - traffic-net
+
+  # ── Cambodia cluster ─────────────────────────────────────────────────────────
+
+  route-service-cambodia:
+    build:
+      context: .
+      dockerfile: services/route-service/Dockerfile
+    container_name: route-service-cambodia
+    ports:
+      - "8016:8000"
+    env_file:
+      - services/route-service/.env
+    environment:
+      SERVICE_NAME: route-service-cambodia
+      REGION: cambodia
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - traffic-net
+
+  validation-service-cambodia:
+    build:
+      context: .
+      dockerfile: services/validation-service/Dockerfile
+    container_name: validation-service-cambodia
+    ports:
+      - "8015:8000"
+    env_file:
+      - services/validation-service/.env
+    environment:
+      SERVICE_NAME: validation-service-cambodia
+      REGION: cambodia
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    networks:
+      - traffic-net
+
+  # ── Andorra cluster (isolated) ───────────────────────────────────────────────
+
+  route-service-andorra:
+    build:
+      context: .
+      dockerfile: services/route-service/Dockerfile
+    container_name: route-service-andorra
+    ports:
+      - "8026:8000"
+    env_file:
+      - services/route-service/.env
+    environment:
+      SERVICE_NAME: route-service-andorra
+      REGION: andorra
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - traffic-net
+
+  validation-service-andorra:
+    build:
+      context: .
+      dockerfile: services/validation-service/Dockerfile
+    container_name: validation-service-andorra
+    ports:
+      - "8025:8000"
+    env_file:
+      - services/validation-service/.env
+    environment:
+      SERVICE_NAME: validation-service-andorra
+      REGION: andorra
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    networks:
+      - traffic-net
+
+  # ── NGINX (global API gateway + static frontend) ────────────────────────────
 
   nginx:
     build:
@@ -272,8 +372,8 @@ services:
       - authority-service
       - journey-management
       - notification-service
-      - route-service
-      - validation-service
+      - route-service-laos
+      - validation-service-laos
       - data-gateway
     networks:
       - traffic-net

@@ -71,8 +71,9 @@ def _load_graph():
         {"from": 1, "to": 1, "distance_km": 1},
     ):
         f, t, d = doc["from"], doc["to"], doc["distance_km"]
-        adjacency.setdefault(f, {})[t] = d
-        edge_count += 1
+        if f in node_coords and t in node_coords:
+            adjacency.setdefault(f, {})[t] = d
+            edge_count += 1
 
     # Prune node coords to only nodes reachable via major roads
     reachable = set(adjacency.keys())
@@ -150,21 +151,25 @@ def astar(start: str, goal: str) -> tuple[list[str], float]:
 
 def _nearest_node(lat: float, lng: float) -> str:
     """Snap coordinates to the nearest graph node using MongoDB 2dsphere index."""
-    doc = get_db().osm_nodes.find_one({
-        "loc": {
-            "$near": {
-                "$geometry": {"type": "Point", "coordinates": [lng, lat]},
-                "$maxDistance": 2000,   # metres
-            }
+    docs = get_db().osm_nodes.find(
+        {
+            "loc": {
+                "$near": {
+                    "$geometry": {"type": "Point", "coordinates": [lng, lat]},
+                    "$maxDistance": 50000,   # metres
+                }
+            },
+            "region": REGION,
         },
-        "region": REGION,
-    })
-    if not doc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No road node within 2 km of ({lat:.5f}, {lng:.5f}) in region '{REGION}'"
-        )
-    return doc["_id"]
+        limit=20,
+    )
+    for doc in docs:
+        if doc["_id"] in node_coords:
+            return doc["_id"]
+    raise HTTPException(
+        status_code=404,
+        detail=f"No road node within 50 km of ({lat:.5f}, {lng:.5f}) in region '{REGION}'"
+    )
 
 
 def _resolve(place: str) -> str:
@@ -240,6 +245,11 @@ def find_route(origin: str, destination: str):
 
     origin_node = _resolve(origin)
     dest_node   = _resolve(destination)
+
+    if origin_node not in node_coords:
+        raise HTTPException(status_code=404, detail=f"Origin '{origin}' snapped to a node not in the road graph")
+    if dest_node not in node_coords:
+        raise HTTPException(status_code=404, detail=f"Destination '{destination}' snapped to a node not in the road graph")
 
     if origin_node == dest_node:
         raise HTTPException(status_code=422, detail="Origin and destination resolve to the same node")

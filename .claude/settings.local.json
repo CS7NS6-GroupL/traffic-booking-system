@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs wc:*)",
+      "Bash(grep -r \"TODO\\\\|FIXME\\\\|stub\\\\|placeholder\\\\|NotImplementedError\\\\|pass$\" D:/Study/Distributed/traffic-booking-system/services --include=\"*.py\")",
+      "Bash(grep:*)",
+      "Bash(docker compose:*)"
+    ]
+  }
+}

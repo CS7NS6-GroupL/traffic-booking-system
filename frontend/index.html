@@ -147,22 +147,35 @@
               <div class="card-header"><i class="bi bi-map-fill me-1"></i>Book a Journey</div>
               <div class="card-body">
                 <div class="mb-2">
-                  <label class="form-label">Route</label>
-                  <select class="form-select" id="route-select">
-                    <optgroup label="Single-region (EU)">
-                      <option value="A|D">A → D &nbsp; EU only · ~40 km</option>
-                      <option value="B|C">B → C &nbsp; EU only · short</option>
-                      <option value="A|C">A → C &nbsp; EU only · direct</option>
+                  <label class="form-label">Quick Routes</label>
+                  <select class="form-select" id="route-select" onchange="applyQuickRoute(this.value)">
+                    <option value="">— type below or pick a preset —</option>
+                    <optgroup label="Single-region (Laos)">
+                      <option value="Vientiane, Laos|Luang Prabang, Laos">Vientiane → Luang Prabang</option>
+                      <option value="Vientiane, Laos|Pakse, Laos">Vientiane → Pakse</option>
                     </optgroup>
-                    <optgroup label="Cross-region ✈">
-                      <option value="A|Z">A → Z &nbsp; EU → US</option>
-                      <option value="A|R">A → R &nbsp; EU → US → Asia</option>
-                      <option value="X|R">X → R &nbsp; US → Asia</option>
+                    <optgroup label="Single-region (Cambodia)">
+                      <option value="Phnom Penh, Cambodia|Siem Reap, Cambodia">Phnom Penh → Siem Reap</option>
+                      <option value="Phnom Penh, Cambodia|Sihanoukville, Cambodia">Phnom Penh → Sihanoukville</option>
                     </optgroup>
-                    <optgroup label="Single-region (Asia)">
-                      <option value="P|R">P → R &nbsp; Asia only</option>
+                    <optgroup label="Cross-region ✈ Laos → Cambodia">
+                      <option value="Pakse, Laos|Stung Treng, Cambodia">Pakse → Stung Treng  (Laos → Cambodia via Voen Kham)</option>
+                      <option value="Vientiane, Laos|Phnom Penh, Cambodia">Vientiane → Phnom Penh  (Laos → Cambodia)</option>
+                    </optgroup>
+                    <optgroup label="Single-region (Andorra)">
+                      <option value="Andorra la Vella, Andorra|Pas de la Casa, Andorra">Andorra la Vella → Pas de la Casa</option>
                     </optgroup>
                   </select>
+                </div>
+                <div class="row g-2 mb-2">
+                  <div class="col-6">
+                    <label class="form-label">Origin</label>
+                    <input class="form-control" id="origin-input" placeholder="e.g. Vientiane, Laos">
+                  </div>
+                  <div class="col-6">
+                    <label class="form-label">Destination</label>
+                    <input class="form-control" id="dest-input" placeholder="e.g. Phnom Penh, Cambodia">
+                  </div>
                 </div>
                 <div class="mb-3">
                   <label class="form-label">Departure (UTC)</label>
@@ -293,7 +306,7 @@
     <!-- ══════════════════════════ SYSTEM HEALTH TAB ═════════════════════════ -->
     <div id="tab-health" class="d-none">
       <div class="d-flex justify-content-between align-items-center mb-3">
-        <span class="section-title mb-0">8 application services — pinging /health</span>
+        <span class="section-title mb-0">12 application services across 3 regions — pinging /health</span>
         <button class="btn btn-sm" style="color:#388bfd;background:none;border:1px solid #388bfd;padding:2px 14px;font-size:0.75rem" onclick="checkHealth()">
           <i class="bi bi-arrow-clockwise me-1"></i>Refresh All
         </button>
@@ -465,8 +478,21 @@ function pushNotification(m) {
 }
 
 // ── Booking ───────────────────────────────────────────────────────────────────
+function applyQuickRoute(val) {
+  if (!val) return;
+  const [o, d] = val.split('|');
+  document.getElementById('origin-input').value = o;
+  document.getElementById('dest-input').value = d;
+}
+
 async function createBooking() {
-  const [origin, destination] = document.getElementById('route-select').value.split('|');
+  const origin      = document.getElementById('origin-input').value.trim();
+  const destination = document.getElementById('dest-input').value.trim();
+  if (!origin || !destination) {
+    document.getElementById('booking-result').innerHTML =
+      `<div class="result-card result-err">Please enter origin and destination</div>`;
+    return;
+  }
   const departure_time = document.getElementById('depart-time').value + ':00Z';
   const resultDiv = document.getElementById('booking-result');
   resultDiv.innerHTML = `<div style="color:#8b949e;font-size:0.83rem"><span class="dot dot-checking me-2"></span>Submitting…</div>`;
@@ -604,14 +630,22 @@ async function flagBooking() {
 
 // ── Health ────────────────────────────────────────────────────────────────────
 const SERVICES = [
-  { name:'Booking Service',      path:'/api/health/booking',      desc:'Entry point — JWT + Kafka producer' },
-  { name:'User Registry',        path:'/api/health/user',         desc:'Register, login, bcrypt, JWT' },
-  { name:'Authority Service',    path:'/api/health/authority',    desc:'AUTHORITY-only audit & enforcement' },
-  { name:'Data Gateway',         path:'/api/health/gateway',      desc:'Cross-region HTTP + Atlas fallback' },
-  { name:'Validation Service',   path:'/api/health/validation',   desc:'Kafka consumer, Redis locks, capacity' },
-  { name:'Route Service',        path:'/api/health/route',        desc:'NetworkX regional graph, Dijkstra' },
-  { name:'Notification Service', path:'/api/health/notification', desc:'WebSocket push, Kafka consumer' },
-  { name:'Journey Management',   path:'/api/health/journey',      desc:'Overlay planner + saga coordinator' },
+  // Global services
+  { name:'Booking Service',           path:'/api/health/booking',        desc:'Entry point — JWT + Kafka producer' },
+  { name:'User Registry',             path:'/api/health/user',           desc:'Global auth — register, login, JWT' },
+  { name:'Authority Service',         path:'/api/health/authority',      desc:'AUTHORITY-only audit & enforcement' },
+  { name:'Data Gateway',              path:'/api/health/gateway',        desc:'Cross-region HTTP + Atlas fallback' },
+  { name:'Notification Service',      path:'/api/health/notification',   desc:'WebSocket push, Kafka consumer' },
+  { name:'Journey Management',        path:'/api/health/journey',        desc:'Overlay planner + saga coordinator' },
+  // Laos cluster
+  { name:'Route Service (Laos)',       path:'/api/health/route-laos',          desc:'A* routing — Laos' },
+  { name:'Validation Service (Laos)',  path:'/api/health/validation-laos',     desc:'Kafka consumer, Redis capacity — Laos' },
+  // Cambodia cluster
+  { name:'Route Service (Cambodia)',   path:'/api/health/route-cambodia',      desc:'A* routing — Cambodia' },
+  { name:'Validation Service (Cambodia)', path:'/api/health/validation-cambodia', desc:'Kafka consumer, Redis capacity — Cambodia' },
+  // Andorra cluster (isolated)
+  { name:'Route Service (Andorra)',    path:'/api/health/route-andorra',       desc:'A* routing — Andorra' },
+  { name:'Validation Service (Andorra)', path:'/api/health/validation-andorra', desc:'Kafka consumer, Redis capacity — Andorra' },
 ];
 
 async function checkHealth() {

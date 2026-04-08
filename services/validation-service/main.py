@@ -84,7 +84,7 @@ def health():
 
 @app.get("/validation/status")
 def status():
-    return {"consumer_group": "validation-group", "topic": "booking-requests", "region": REGION}
+    return {"consumer_group": f"validation-group-{REGION}", "topic": "booking-requests", "region": REGION}
 
 
 def _validate_and_publish(message: dict, producer):
@@ -193,6 +193,10 @@ def _validate_and_publish(message: dict, producer):
     if saga_id:
         result["saga_id"] = saga_id
 
+    # Mark sub-booking outcomes so notification-service can skip intermediate results.
+    # The saga coordinator publishes the definitive final outcome separately.
+    if saga_id:
+        result["is_sub_booking"] = True
     producer.send("booking-outcomes", result)
 
 
@@ -220,7 +224,7 @@ def _booking_consumer_loop():
             "booking-requests",
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
             value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-            group_id="validation-group",
+            group_id=f"validation-group-{REGION}",
             auto_offset_reset="earliest",
         )
         producer = KafkaProducer(
@@ -245,7 +249,7 @@ def _release_consumer_loop():
             "capacity-releases",
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
             value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-            group_id="capacity-release-group",
+            group_id=f"capacity-release-group-{REGION}",
             auto_offset_reset="earliest",
         )
         for msg in consumer:

@@ -60,6 +60,10 @@ def _kafka_consumer_loop():
         )
         for msg in consumer:
             payload = msg.value
+            # Skip intermediate saga sub-booking results — only push the final
+            # outcome published by the saga coordinator (is_sub_booking absent).
+            if payload.get("is_sub_booking"):
+                continue
             driver_id = payload.get("driver_id")
             if driver_id and _main_loop and not _main_loop.is_closed():
                 future = asyncio.run_coroutine_threadsafe(

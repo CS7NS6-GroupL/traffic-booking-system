@@ -67,28 +67,17 @@ db.road_network.insertMany([
   },
 ]);
 
-// ── Sample users ──────────────────────────────────────────────────────────────
-
+// ── Users ──────────────────────────────────────────────────────────────────────
+// Users must be created via POST /auth/register (passwords are bcrypt-hashed).
+// Example:
+//   curl -X POST http://localhost/api/auth/register \
+//        -H "Content-Type: application/json" \
+//        -d '{"username":"alice","password":"password123","vehicle_id":"veh-001","role":"DRIVER"}'
+//
+//   curl -X POST http://localhost/api/auth/register \
+//        -H "Content-Type: application/json" \
+//        -d '{"username":"authority1","password":"password123","vehicle_id":"","role":"AUTHORITY"}'
 db.users.deleteMany({});
-db.users.insertMany([
-  // NOTE: seed users have plaintext passwords here for readability.
-  // In production, passwords are bcrypt-hashed by user-registry at registration.
-  // These seed users are for demo/testing only — register real users via POST /auth/register.
-  {
-    username:   "alice",
-    password:   "$2b$12$placeholder_hash_register_via_api",
-    vehicle_id: "veh-001",
-    role:       "DRIVER",
-    created_at: new Date().toISOString(),
-  },
-  {
-    username:   "authority_agent",
-    password:   "$2b$12$placeholder_hash_register_via_api",
-    vehicle_id: null,
-    role:       "AUTHORITY",
-    created_at: new Date().toISOString(),
-  },
-]);
 
 // ── Sample bookings ───────────────────────────────────────────────────────────
 
