@@ -1,6 +1,10 @@
-fastapi
-uvicorn[standard]
-pydantic
-python-dotenv
-httpx
-kafka-python
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+httpx==0.27.0
+kafka-python==2.0.2
+PyJWT==2.8.0
+pymongo==4.7.2
+tenacity==8.3.0
+pytest==8.2.0
+pytest-asyncio==0.23.7
