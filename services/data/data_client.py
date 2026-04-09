@@ -41,45 +41,6 @@ def _delete(path: str, body=None):
 
 
 # =============================================================================
-# Segment validation
-# =============================================================================
-
-def validate_and_reserve(segments: list[dict], vehicle_id: str) -> dict:
-    return _post("/segments/validate", {"segments": segments, "vehicle_id": vehicle_id})
-
-
-def release_segments(segments: list[dict]):
-    _post("/segments/release", {"segments": segments})
-
-
-# Individual lock/capacity helpers (kept for compatibility)
-def acquire_segment_lock(from_node: str, to_node: str, ttl: int = 10) -> bool:
-    r = _client.post("/segments/lock", json={"from_node": from_node, "to_node": to_node, "ttl": ttl})
-    r.raise_for_status()
-    return r.json().get("acquired", False)
-
-
-def release_segment_lock(from_node: str, to_node: str):
-    _delete("/segments/lock", {"from_node": from_node, "to_node": to_node})
-
-
-def get_segment_capacity(from_node: str, to_node: str) -> int:
-    return _get("/segments/capacity", from_node=from_node, to_node=to_node).get("capacity", 100)
-
-
-def get_segment_current(from_node: str, to_node: str) -> int:
-    return _get("/segments/current", from_node=from_node, to_node=to_node).get("current", 0)
-
-
-def increment_segment_current(from_node: str, to_node: str):
-    _post("/segments/increment", {"from_node": from_node, "to_node": to_node})
-
-
-def decrement_segment_current(from_node: str, to_node: str):
-    _post("/segments/decrement", {"from_node": from_node, "to_node": to_node})
-
-
-# =============================================================================
 # Bookings
 # =============================================================================
 

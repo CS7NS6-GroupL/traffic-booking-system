@@ -50,7 +50,6 @@ app = FastAPI(title="Journey Management Service")
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "journey-management")
 REGION = os.getenv("REGION", "local")
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 JWT_SECRET = os.getenv("JWT_SECRET", "changeme")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 
@@ -61,6 +60,14 @@ REGION_ROUTE_URLS: dict[str, str] = {
     "andorra":  os.getenv("ANDORRA_ROUTE_URL",  "http://route-service-andorra:8000"),
     "laos":     os.getenv("LAOS_ROUTE_URL",     "http://route-service-laos:8000"),
     "cambodia": os.getenv("CAMBODIA_ROUTE_URL", "http://route-service-cambodia:8000"),
+}
+
+# Per-region data-service URLs — bookings are stored in the origin region's MongoDB.
+# Sagas are still stored in the global data-service (DATA_SERVICE_URL).
+REGION_DATA_SERVICES: dict[str, str] = {
+    "laos":     os.getenv("DATA_SERVICE_LAOS",     "http://data-service-laos:8009"),
+    "cambodia": os.getenv("DATA_SERVICE_CAMBODIA", "http://data-service-cambodia:8009"),
+    "andorra":  os.getenv("DATA_SERVICE_ANDORRA",  "http://data-service-andorra:8009"),
 }
 
 # ── Gateway node IDs ──────────────────────────────────────────────────────────
@@ -95,12 +102,6 @@ OVERLAY: dict[str, dict] = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def get_db():
-    from pymongo import MongoClient
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
-    return client["traffic"]
-
-
 def _verify(authorization: str) -> dict:
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid authorization header")
@@ -117,6 +118,60 @@ def _kafka_producer():
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         value_serializer=lambda v: json.dumps(v).encode("utf-8"),
     )
+
+
+# ── Regional data-service helpers (scatter-gather) ───────────────────────────
+
+def _regional_ds_post(region: str, path: str, body: dict):
+    """POST to a regional data-service."""
+    url = REGION_DATA_SERVICES.get(region)
+    if not url:
+        raise ValueError(f"No data-service configured for region '{region}'")
+    with httpx.Client(timeout=10.0) as c:
+        r = c.post(f"{url}{path}", json=body)
+        r.raise_for_status()
+        return r.json()
+
+
+def _find_booking_across_regions(booking_id: str):
+    """Query all regional data-services for a booking. Returns (doc, region) or (None, None)."""
+    for region, url in REGION_DATA_SERVICES.items():
+        try:
+            with httpx.Client(timeout=3.0) as c:
+                r = c.get(f"{url}/bookings/{booking_id}")
+                if r.status_code == 200:
+                    return r.json(), region
+        except Exception:
+            pass
+    return None, None
+
+
+def _get_bookings_by_driver_all_regions(driver_id: str) -> list:
+    """Scatter-gather bookings for a driver across all regional data-services."""
+    all_bookings = []
+    for region, url in REGION_DATA_SERVICES.items():
+        try:
+            with httpx.Client(timeout=5.0) as c:
+                r = c.get(f"{url}/bookings/driver/{driver_id}")
+                if r.status_code == 200:
+                    all_bookings.extend(r.json() or [])
+        except Exception:
+            pass
+    return sorted(all_bookings, key=lambda b: b.get("created_at", ""), reverse=True)
+
+
+def _cancel_booking_in_region(booking_id: str, cancelled_at: str):
+    """Find and cancel a booking in whichever regional data-service holds it."""
+    for region, url in REGION_DATA_SERVICES.items():
+        try:
+            with httpx.Client(timeout=5.0) as c:
+                r = c.patch(f"{url}/bookings/{booking_id}/cancel",
+                            params={"cancelled_at": cancelled_at})
+                if r.status_code == 200:
+                    return True
+        except Exception:
+            pass
+    return False
 
 
 # ── Overlay routing helpers ───────────────────────────────────────────────────
@@ -410,7 +465,7 @@ def _advance_saga(saga_id: str, region: str, outcome: str, reason: str):
                 "regional_outcomes": outcomes,
             })
         else:
-            ds.insert_booking({
+            booking_doc = {
                 "booking_id":       saga["booking_id"],
                 "saga_id":          saga_id,
                 "driver_id":        saga["driver_id"],
@@ -421,7 +476,14 @@ def _advance_saga(saga_id: str, region: str, outcome: str, reason: str):
                 "regions_involved": regions_involved,
                 "status":           "approved",
                 "created_at":       datetime.utcnow().isoformat(),
-            })
+            }
+            # Write booking to origin region's MongoDB (first region in the saga)
+            origin_region = regions_involved[0]
+            try:
+                _regional_ds_post(origin_region, "/bookings", booking_doc)
+            except Exception as exc:
+                print(f"[journey-management] regional booking write failed for {origin_region}: {exc}")
+                ds.insert_booking(booking_doc)  # fallback to global
             ds.update_saga_status(saga_id, "COMMITTED")
             producer.send("booking-outcomes", {
                 "booking_id":        saga["booking_id"],
@@ -471,9 +533,7 @@ def list_journeys(authorization: str = Header(...)):
     payload = _verify(authorization)
     driver_id = payload.get("sub")
     try:
-        import sys; sys.path.insert(0, "/app/data")
-        import data_service as ds
-        bookings = ds.get_bookings_by_driver(driver_id)
+        bookings = _get_bookings_by_driver_all_regions(driver_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Data service unavailable: {exc}")
     return {"driver_id": driver_id, "bookings": bookings, "region": REGION}
@@ -482,12 +542,7 @@ def list_journeys(authorization: str = Header(...)):
 @app.get("/journeys/{booking_id}")
 def get_journey(booking_id: str, authorization: str = Header(...)):
     _verify(authorization)
-    try:
-        import sys; sys.path.insert(0, "/app/data")
-        import data_service as ds
-        booking = ds.get_booking_by_id(booking_id)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Data service unavailable: {exc}")
+    booking, _ = _find_booking_across_regions(booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
     return booking
@@ -505,14 +560,14 @@ def cancel_journey(booking_id: str, authorization: str = Header(...)):
     import sys; sys.path.insert(0, "/app/data")
     import data_service as ds
     try:
-        booking = ds.get_booking_by_id(booking_id)
+        booking, _ = _find_booking_across_regions(booking_id)
         if not booking:
             raise HTTPException(status_code=404, detail="Booking not found")
         if booking.get("driver_id") != payload.get("sub"):
             raise HTTPException(status_code=403, detail="Not your booking")
         if booking.get("status") == "cancelled":
             raise HTTPException(status_code=409, detail="Already cancelled")
-        ds.cancel_booking_record(booking_id, datetime.utcnow().isoformat())
+        _cancel_booking_in_region(booking_id, datetime.utcnow().isoformat())
     except HTTPException:
         raise
     except Exception as exc:

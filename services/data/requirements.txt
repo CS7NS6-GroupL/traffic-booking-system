@@ -3,5 +3,4 @@ uvicorn[standard]
 pydantic
 python-dotenv
 pymongo
-redis
 tenacity

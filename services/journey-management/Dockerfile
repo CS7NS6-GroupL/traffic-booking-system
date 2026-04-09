@@ -19,6 +19,7 @@ COPY services/data/data_client.py /app/data/data_service.py
 # Copy service code
 COPY services/journey-management/ /app/
 
+ENV PYTHONUNBUFFERED=1
 ENV SERVICE_NAME=journey-management
 
 EXPOSE 8000

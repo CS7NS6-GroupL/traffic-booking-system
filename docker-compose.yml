@@ -16,7 +16,12 @@ networks:
 
 volumes:
   mongo-data:
-  redis-data:
+  mongo-laos-data:
+  mongo-cambodia-data:
+  mongo-andorra-data:
+  redis-laos-data:
+  redis-cambodia-data:
+  redis-andorra-data:
 
 services:
 
@@ -25,6 +30,7 @@ services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zookeeper
+    restart: unless-stopped
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -34,6 +40,7 @@ services:
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: kafka
+    restart: unless-stopped
     depends_on:
       - zookeeper
     ports:
@@ -53,8 +60,10 @@ services:
       retries: 10
 
   # Creates all Kafka topics before any service starts consuming or producing.
+  # on-failure: retries if topic creation fails, but does not restart after clean exit.
   kafka-init:
     image: confluentinc/cp-kafka:7.5.0
+    restart: on-failure
     depends_on:
       kafka:
         condition: service_healthy
@@ -69,14 +78,43 @@ services:
     networks:
       - traffic-net
 
-  redis:
+  redis-laos:
     image: redis:7-alpine
-    container_name: redis
+    container_name: redis-laos
     command: redis-server --save 60 1
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
     volumes:
-      - redis-data:/data
+      - redis-laos-data:/data
+    networks:
+      - traffic-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-cambodia:
+    image: redis:7-alpine
+    container_name: redis-cambodia
+    command: redis-server --save 60 1
+    restart: unless-stopped
+    volumes:
+      - redis-cambodia-data:/data
+    networks:
+      - traffic-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-andorra:
+    image: redis:7-alpine
+    container_name: redis-andorra
+    command: redis-server --save 60 1
+    restart: unless-stopped
+    volumes:
+      - redis-andorra-data:/data
     networks:
       - traffic-net
     healthcheck:
@@ -88,11 +126,63 @@ services:
   mongo:
     image: mongo:7
     container_name: mongo
+    restart: unless-stopped
     ports:
       - "27017:27017"
     volumes:
       - mongo-data:/data/db
       - ./infra/mongo/seed.js:/docker-entrypoint-initdb.d/seed.js:ro
+    networks:
+      - traffic-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # Regional MongoDB instances — OSM graph data only (osm_nodes, osm_edges).
+  # Run import_osm.py against each after stack is up (see CLAUDE.md).
+
+  mongo-laos:
+    image: mongo:7
+    container_name: mongo-laos
+    restart: unless-stopped
+    ports:
+      - "27020:27017"
+    volumes:
+      - mongo-laos-data:/data/db
+    networks:
+      - traffic-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  mongo-cambodia:
+    image: mongo:7
+    container_name: mongo-cambodia
+    restart: unless-stopped
+    ports:
+      - "27021:27017"
+    volumes:
+      - mongo-cambodia-data:/data/db
+    networks:
+      - traffic-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  mongo-andorra:
+    image: mongo:7
+    container_name: mongo-andorra
+    restart: unless-stopped
+    ports:
+      - "27022:27017"
+    volumes:
+      - mongo-andorra-data:/data/db
     networks:
       - traffic-net
     healthcheck:
@@ -108,6 +198,7 @@ services:
       context: .
       dockerfile: services/user-registry/Dockerfile
     container_name: user-registry
+    restart: unless-stopped
     ports:
       - "8002:8000"
     env_file:
@@ -120,22 +211,112 @@ services:
     networks:
       - traffic-net
 
-  authority-service:
+  # Regional data-service instances — bookings stored per region
+  data-service-laos:
+    build:
+      context: .
+      dockerfile: services/data/Dockerfile
+    container_name: data-service-laos
+    restart: unless-stopped
+    ports:
+      - "8019:8009"
+    environment:
+      SERVICE_NAME: data-service-laos
+      REGION: laos
+      MONGO_URI: mongodb://mongo-laos:27017
+    depends_on:
+      mongo-laos:
+        condition: service_healthy
+    networks:
+      - traffic-net
+
+  data-service-cambodia:
+    build:
+      context: .
+      dockerfile: services/data/Dockerfile
+    container_name: data-service-cambodia
+    restart: unless-stopped
+    ports:
+      - "8029:8009"
+    environment:
+      SERVICE_NAME: data-service-cambodia
+      REGION: cambodia
+      MONGO_URI: mongodb://mongo-cambodia:27017
+    depends_on:
+      mongo-cambodia:
+        condition: service_healthy
+    networks:
+      - traffic-net
+
+  data-service-andorra:
+    build:
+      context: .
+      dockerfile: services/data/Dockerfile
+    container_name: data-service-andorra
+    restart: unless-stopped
+    ports:
+      - "8039:8009"
+    environment:
+      SERVICE_NAME: data-service-andorra
+      REGION: andorra
+      MONGO_URI: mongodb://mongo-andorra:27017
+    depends_on:
+      mongo-andorra:
+        condition: service_healthy
+    networks:
+      - traffic-net
+
+  # Regional authority-service instances — each authority can only see its own region
+  authority-service-laos:
     build:
       context: .
       dockerfile: services/authority-service/Dockerfile
-    container_name: authority-service
+    container_name: authority-service-laos
+    restart: unless-stopped
     ports:
-      - "8003:8000"
-    env_file:
-      - services/authority-service/.env
+      - "8013:8000"
     environment:
-      SERVICE_NAME: authority-service
-      DATA_SERVICE_URL: http://data-service:8009
+      SERVICE_NAME: authority-service-laos
+      REGION: laos
+      DATA_SERVICE_URL: http://data-service-laos:8009
     depends_on:
-      mongo:
-        condition: service_healthy
-      data-service:
+      data-service-laos:
+        condition: service_started
+    networks:
+      - traffic-net
+
+  authority-service-cambodia:
+    build:
+      context: .
+      dockerfile: services/authority-service/Dockerfile
+    container_name: authority-service-cambodia
+    restart: unless-stopped
+    ports:
+      - "8023:8000"
+    environment:
+      SERVICE_NAME: authority-service-cambodia
+      REGION: cambodia
+      DATA_SERVICE_URL: http://data-service-cambodia:8009
+    depends_on:
+      data-service-cambodia:
+        condition: service_started
+    networks:
+      - traffic-net
+
+  authority-service-andorra:
+    build:
+      context: .
+      dockerfile: services/authority-service/Dockerfile
+    container_name: authority-service-andorra
+    restart: unless-stopped
+    ports:
+      - "8033:8000"
+    environment:
+      SERVICE_NAME: authority-service-andorra
+      REGION: andorra
+      DATA_SERVICE_URL: http://data-service-andorra:8009
+    depends_on:
+      data-service-andorra:
         condition: service_started
     networks:
       - traffic-net
@@ -145,6 +326,7 @@ services:
       context: .
       dockerfile: services/notification-service/Dockerfile
     container_name: notification-service
+    restart: unless-stopped
     ports:
       - "8007:8000"
     env_file:
@@ -159,22 +341,20 @@ services:
     networks:
       - traffic-net
 
-  # Data Service — single source of truth for all MongoDB/Redis access
+  # Data Service — single source of truth for all MongoDB access
   data-service:
     build:
       context: .
       dockerfile: services/data/Dockerfile
     container_name: data-service
+    restart: unless-stopped
     ports:
       - "8009:8009"
     environment:
       SERVICE_NAME: data-service
       MONGO_URI: mongodb://mongo:27017
-      REDIS_URL: redis://redis:6379
     depends_on:
       mongo:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     networks:
       - traffic-net
@@ -186,14 +366,17 @@ services:
       context: .
       dockerfile: services/journey-management/Dockerfile
     container_name: journey-management
+    restart: unless-stopped
     ports:
       - "8008:8000"
     env_file:
       - services/journey-management/.env
     environment:
       SERVICE_NAME: journey-management
-      REGION: laos
       DATA_SERVICE_URL: http://data-service:8009
+      DATA_SERVICE_LAOS: http://data-service-laos:8009
+      DATA_SERVICE_CAMBODIA: http://data-service-cambodia:8009
+      DATA_SERVICE_ANDORRA: http://data-service-andorra:8009
       ANDORRA_ROUTE_URL: http://route-service-andorra:8000
       LAOS_ROUTE_URL: http://route-service-laos:8000
       CAMBODIA_ROUTE_URL: http://route-service-cambodia:8000
@@ -208,6 +391,12 @@ services:
         condition: service_healthy
       data-service:
         condition: service_started
+      data-service-laos:
+        condition: service_started
+      data-service-cambodia:
+        condition: service_started
+      data-service-andorra:
+        condition: service_started
     networks:
       - traffic-net
 
@@ -216,6 +405,7 @@ services:
       context: .
       dockerfile: services/data-gateway/Dockerfile
     container_name: data-gateway
+    restart: unless-stopped
     ports:
       - "8004:8000"
     env_file:
@@ -236,6 +426,7 @@ services:
       context: .
       dockerfile: services/booking-service/Dockerfile
     container_name: booking-service
+    restart: unless-stopped
     ports:
       - "8001:8000"
     env_file:
@@ -259,6 +450,7 @@ services:
       context: .
       dockerfile: services/route-service/Dockerfile
     container_name: route-service-laos
+    restart: unless-stopped
     ports:
       - "8006:8000"
     env_file:
@@ -266,8 +458,9 @@ services:
     environment:
       SERVICE_NAME: route-service-laos
       REGION: laos
+      MONGO_URI: mongodb://mongo-laos:27017
     depends_on:
-      mongo:
+      mongo-laos:
         condition: service_healthy
     networks:
       - traffic-net
@@ -277,6 +470,7 @@ services:
       context: .
       dockerfile: services/validation-service/Dockerfile
     container_name: validation-service-laos
+    restart: unless-stopped
     ports:
       - "8005:8000"
     env_file:
@@ -284,17 +478,19 @@ services:
     environment:
       SERVICE_NAME: validation-service-laos
       REGION: laos
-      DATA_SERVICE_URL: http://data-service:8009
+      REDIS_URL: redis://redis-laos:6379
+      MONGO_URI: mongodb://mongo-laos:27017
+      DATA_SERVICE_URL: http://data-service-laos:8009
     depends_on:
       kafka:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
-      redis:
+      redis-laos:
         condition: service_healthy
-      mongo:
+      mongo-laos:
         condition: service_healthy
-      data-service:
+      data-service-laos:
         condition: service_started
     networks:
       - traffic-net
@@ -306,6 +502,7 @@ services:
       context: .
       dockerfile: services/route-service/Dockerfile
     container_name: route-service-cambodia
+    restart: unless-stopped
     ports:
       - "8016:8000"
     env_file:
@@ -313,8 +510,9 @@ services:
     environment:
       SERVICE_NAME: route-service-cambodia
       REGION: cambodia
+      MONGO_URI: mongodb://mongo-cambodia:27017
     depends_on:
-      mongo:
+      mongo-cambodia:
         condition: service_healthy
     networks:
       - traffic-net
@@ -324,6 +522,7 @@ services:
       context: .
       dockerfile: services/validation-service/Dockerfile
     container_name: validation-service-cambodia
+    restart: unless-stopped
     ports:
       - "8015:8000"
     env_file:
@@ -331,17 +530,19 @@ services:
     environment:
       SERVICE_NAME: validation-service-cambodia
       REGION: cambodia
-      DATA_SERVICE_URL: http://data-service:8009
+      REDIS_URL: redis://redis-cambodia:6379
+      MONGO_URI: mongodb://mongo-cambodia:27017
+      DATA_SERVICE_URL: http://data-service-cambodia:8009
     depends_on:
       kafka:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
-      redis:
+      redis-cambodia:
         condition: service_healthy
-      mongo:
+      mongo-cambodia:
         condition: service_healthy
-      data-service:
+      data-service-cambodia:
         condition: service_started
     networks:
       - traffic-net
@@ -353,6 +554,7 @@ services:
       context: .
       dockerfile: services/route-service/Dockerfile
     container_name: route-service-andorra
+    restart: unless-stopped
     ports:
       - "8026:8000"
     env_file:
@@ -360,8 +562,9 @@ services:
     environment:
       SERVICE_NAME: route-service-andorra
       REGION: andorra
+      MONGO_URI: mongodb://mongo-andorra:27017
     depends_on:
-      mongo:
+      mongo-andorra:
         condition: service_healthy
     networks:
       - traffic-net
@@ -371,6 +574,7 @@ services:
       context: .
       dockerfile: services/validation-service/Dockerfile
     container_name: validation-service-andorra
+    restart: unless-stopped
     ports:
       - "8025:8000"
     env_file:
@@ -378,17 +582,19 @@ services:
     environment:
       SERVICE_NAME: validation-service-andorra
       REGION: andorra
-      DATA_SERVICE_URL: http://data-service:8009
+      REDIS_URL: redis://redis-andorra:6379
+      MONGO_URI: mongodb://mongo-andorra:27017
+      DATA_SERVICE_URL: http://data-service-andorra:8009
     depends_on:
       kafka:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
-      redis:
+      redis-andorra:
         condition: service_healthy
-      mongo:
+      mongo-andorra:
         condition: service_healthy
-      data-service:
+      data-service-andorra:
         condition: service_started
     networks:
       - traffic-net
@@ -400,12 +606,15 @@ services:
       context: .
       dockerfile: infra/nginx/Dockerfile
     container_name: nginx
+    restart: unless-stopped
     ports:
       - "80:80"
     depends_on:
       - booking-service
       - user-registry
-      - authority-service
+      - authority-service-laos
+      - authority-service-cambodia
+      - authority-service-andorra
       - journey-management
       - notification-service
       - route-service-laos

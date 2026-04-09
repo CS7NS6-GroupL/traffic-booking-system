@@ -16,6 +16,7 @@ COPY shared/ /app/shared/
 # Copy service code
 COPY services/booking-service/ /app/
 
+ENV PYTHONUNBUFFERED=1
 ENV SERVICE_NAME=booking-service
 
 EXPOSE 8000

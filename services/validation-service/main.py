@@ -15,12 +15,20 @@ Capacity rollback
 -----------------
 Also consumes `capacity-releases` to decrement Redis counters when a booking
 is cancelled or a saga is aborted. This is the compensating transaction.
+
+Redis is regional — this service owns the segment locks and counters
+for its region directly. MongoDB access (bookings, vehicle lookup) goes
+via data-service HTTP.
 """
 
 import json
 import os
 import sys
 import threading
+import time
+from datetime import datetime, UTC
+
+import redis as redis_lib
 
 sys.path.insert(0, "/app/data")
 
@@ -28,20 +36,114 @@ from fastapi import FastAPI
 
 app = FastAPI(title="Validation Service")
 
-SERVICE_NAME = os.getenv("SERVICE_NAME", "validation-service")
-REGION = os.getenv("REGION", "local")
+SERVICE_NAME            = os.getenv("SERVICE_NAME", "validation-service")
+REGION                  = os.getenv("REGION", "local")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-from datetime import datetime, UTC
+REDIS_URL               = os.getenv("REDIS_URL", "redis://localhost:6379")
+MONGO_URI               = os.getenv("MONGO_URI", "mongodb://mongo:27017")
+LOCK_TTL                = 10  # seconds
+
+# Capacity per road type — default 100 for anything not listed
+ROAD_TYPE_CAPACITY = {
+    "motorway":         200,
+    "motorway_link":    100,
+    "trunk":            150,
+    "trunk_link":        75,
+    "primary":          100,
+    "primary_link":      50,
+    "secondary":         75,
+    "secondary_link":    40,
+    "tertiary":          50,
+    "tertiary_link":     25,
+}
+
+_redis = redis_lib.from_url(REDIS_URL, decode_responses=True)
+
 
 def now_utc_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+# =============================================================================
+# Redis key helpers
+# =============================================================================
+
+def _lock_key(f: str, t: str) -> str:
+    return f"lock:segment:{f}:{t}"
+
+def _cap_key(f: str, t: str) -> str:
+    return f"capacity:segment:{f}:{t}"
+
+def _cur_key(f: str, t: str) -> str:
+    return f"current:segment:{f}:{t}"
+
+
+# =============================================================================
+# Segment validation — owns Redis directly (regional)
+# =============================================================================
+
+def validate_and_reserve(segments: list[dict], vehicle_id: str) -> dict:
+    """
+    Acquire locks, check capacity, check duplicate booking, increment counters.
+    All Redis ops are local to this region's Redis instance.
+    Duplicate vehicle check goes via data-service HTTP (MongoDB).
+    """
+    import data_service as ds
+
+    sorted_segs = sorted(segments, key=lambda s: _lock_key(s["from"], s["to"]))
+    acquired: list[tuple[str, str]] = []
+
+    try:
+        for seg in sorted_segs:
+            if not _redis.set(_lock_key(seg["from"], seg["to"]), "1", nx=True, ex=LOCK_TTL):
+                return {
+                    "outcome": "REJECTED",
+                    "reason":  f"Segment lock contention on {seg['from']}->{seg['to']} — please retry",
+                }
+            acquired.append((seg["from"], seg["to"]))
+
+        for seg in sorted_segs:
+            cap = int(_redis.get(_cap_key(seg["from"], seg["to"])) or 100)
+            cur = int(_redis.get(_cur_key(seg["from"], seg["to"])) or 0)
+            if cur >= cap:
+                return {
+                    "outcome": "REJECTED",
+                    "reason":  f"Road segment {seg['from']}->{seg['to']} at full capacity ({cur}/{cap})",
+                }
+
+        if ds.get_vehicle_booking_fallback(vehicle_id):
+            return {
+                "outcome": "REJECTED",
+                "reason":  f"Vehicle {vehicle_id} already has an active booking",
+            }
+
+        for seg in sorted_segs:
+            _redis.incr(_cur_key(seg["from"], seg["to"]))
+
+        print(f"[{REGION}] Redis locks released, counters incremented for {len(sorted_segs)} segments")
+        return {"outcome": "APPROVED", "reason": "Booking approved"}
+
+    finally:
+        for fn, tn in reversed(acquired):
+            try:
+                _redis.delete(_lock_key(fn, tn))
+            except Exception:
+                pass
+
+
+def release_segments(segments: list[dict]):
+    """Decrement counters for cancelled or rolled-back bookings."""
+    for seg in segments:
+        key = _cur_key(seg["from"], seg["to"])
+        if int(_redis.get(key) or 0) > 0:
+            _redis.decr(key)
+
+
+# =============================================================================
+# Message helpers
+# =============================================================================
+
 def _message_segments(message: dict) -> list[dict]:
-    """
-    Normalize the payload to a segment list.
-    Falls back to the legacy top-level origin/destination shape.
-    """
     segments = message.get("segments") or []
     if segments:
         return [
@@ -49,18 +151,24 @@ def _message_segments(message: dict) -> list[dict]:
             for seg in segments
             if seg.get("from") and seg.get("to")
         ]
-
-    origin = message.get("origin")
+    origin      = message.get("origin")
     destination = message.get("destination")
     if origin and destination:
         return [{"from": origin, "to": destination}]
     return []
 
 
+# =============================================================================
+# HTTP endpoints
+# =============================================================================
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": SERVICE_NAME, "region": REGION}
+    try:
+        redis_ok = bool(_redis.ping())
+    except Exception:
+        redis_ok = False
+    return {"status": "ok", "service": SERVICE_NAME, "region": REGION, "redis": redis_ok}
 
 
 @app.get("/validation/status")
@@ -68,14 +176,18 @@ def status():
     return {"consumer_group": f"validation-group-{REGION}", "topic": "booking-requests", "region": REGION}
 
 
+# =============================================================================
+# Kafka handlers
+# =============================================================================
+
 def _validate_and_publish(message: dict, producer):
     """Validate one booking (or sub-booking) and publish the outcome."""
     import data_service as ds
 
-    booking_id = message.get("booking_id", "unknown")
-    saga_id    = message.get("saga_id")
-    vehicle_id = message.get("vehicle_id")
-    segments   = _message_segments(message)
+    booking_id  = message.get("booking_id", "unknown")
+    saga_id     = message.get("saga_id")
+    vehicle_id  = message.get("vehicle_id")
+    segments    = _message_segments(message)
     origin      = segments[0]["from"] if segments else message.get("origin")
     destination = segments[-1]["to"]  if segments else message.get("destination")
 
@@ -84,7 +196,7 @@ def _validate_and_publish(message: dict, producer):
             outcome = "REJECTED"
             reason  = "Booking contains no valid segments"
         else:
-            result  = ds.validate_and_reserve(segments, vehicle_id)
+            result  = validate_and_reserve(segments, vehicle_id)
             outcome = result["outcome"]
             reason  = result["reason"]
             if outcome == "APPROVED" and not saga_id:
@@ -97,24 +209,23 @@ def _validate_and_publish(message: dict, producer):
         outcome = "REJECTED"
         reason  = f"Internal validation error: {exc}"
 
+    print(f"[{REGION}] booking {booking_id} → {outcome} ({reason})")
+
     result = {
-        "booking_id": booking_id,
-        "driver_id": message.get("driver_id"),
-        "vehicle_id": vehicle_id,
-        "origin": origin,
-        "destination": destination,
-        "region": REGION,
+        "booking_id":    booking_id,
+        "driver_id":     message.get("driver_id"),
+        "vehicle_id":    vehicle_id,
+        "origin":        origin,
+        "destination":   destination,
+        "region":        REGION,
         "target_region": message.get("target_region", REGION),
-        "outcome": outcome,
-        "reason": reason,
+        "outcome":       outcome,
+        "reason":        reason,
     }
     if saga_id:
-        result["saga_id"] = saga_id
-
-    # Mark sub-booking outcomes so notification-service can skip intermediate results.
-    # The saga coordinator publishes the definitive final outcome separately.
-    if saga_id:
+        result["saga_id"]       = saga_id
         result["is_sub_booking"] = True
+
     producer.send("booking-outcomes", result)
 
 
@@ -123,8 +234,7 @@ def _release_capacity(message: dict):
     target_region = message.get("target_region", message.get("region", REGION))
     if target_region != REGION:
         return
-    import data_service as ds
-    ds.release_segments(_message_segments(message))
+    release_segments(_message_segments(message))
 
 
 def _booking_consumer_loop():
@@ -144,9 +254,10 @@ def _booking_consumer_loop():
         )
         for msg in consumer:
             payload = msg.value
-            target = payload.get("target_region")
+            target  = payload.get("target_region")
             if target and target != REGION:
                 continue
+            print(f"[{REGION}] received from Kafka: booking {payload.get('booking_id')} saga={payload.get('saga_id')}")
             _validate_and_publish(payload, producer)
     except Exception as exc:
         print(f"[validation-service] booking consumer error: {exc}")
@@ -169,47 +280,81 @@ def _release_consumer_loop():
         print(f"[validation-service] release consumer error: {exc}")
 
 
+# =============================================================================
+# Startup — seed Redis capacity from OSM edges
+# =============================================================================
+
 def _seed_redis_capacity():
     """
-    Seed Redis capacity counters from MongoDB osm_edges for this region.
-    Uses SET NX so a restart does not overwrite live counters or tuned limits.
+    Seed Redis capacity counters from osm_edges for this region.
+    Uses SET NX so a restart does not overwrite live counters.
+    Uses pipelining to batch Redis writes — avoids one round-trip per edge.
+    MONGO_URI points to the regional MongoDB (Phase 2 will set this per-region;
+    for now it points to the shared mongo).
     """
-    import redis as redis_lib
     from pymongo import MongoClient
 
+    BATCH = 500  # pipeline flush size
+
     try:
-        r = redis_lib.from_url(REDIS_URL)
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
-        db = client["traffic"]
-        edges = db.osm_edges.find(
+        db     = client["traffic"]
+        edges  = db.osm_edges.find(
             {"region": REGION},
             {"from": 1, "to": 1, "road_type": 1},
         )
 
         seeded = 0
+        pipe   = _redis.pipeline(transaction=False)
+
         for edge in edges:
-            origin = edge.get("from")
-            destination = edge.get("to")
-            if not origin or not destination:
+            f = edge.get("from")
+            t = edge.get("to")
+            if not f or not t:
                 continue
-
-            road_type = edge.get("road_type", "")
-            capacity = ROAD_TYPE_CAPACITY.get(road_type, 100)
-            cap_key = f"capacity:segment:{origin}:{destination}"
-            cur_key = f"current:segment:{origin}:{destination}"
-            r.set(cap_key, capacity, nx=True)
-            r.set(cur_key, 0, nx=True)
+            capacity = ROAD_TYPE_CAPACITY.get(edge.get("road_type", ""), 100)
+            pipe.set(_cap_key(f, t), capacity, nx=True)
+            pipe.set(_cur_key(f, t), 0,        nx=True)
             seeded += 1
+            if seeded % BATCH == 0:
+                pipe.execute()
+                pipe = _redis.pipeline(transaction=False)
 
+        pipe.execute()  # flush remainder
         client.close()
         print(f"[validation-service] Seeded {seeded} Redis segment keys for region '{REGION}'")
     except Exception as exc:
         print(f"[validation-service] Redis seed warning: {exc}")
 
 
+def _redis_watchdog():
+    """
+    Polls Redis every 30s. If it detects an empty store (capacity keys gone —
+    e.g. after a Redis crash and restart), re-seeds from MongoDB automatically.
+    Uses a probe key written at startup; if that key disappears, Redis was wiped.
+    """
+    PROBE_KEY    = f"watchdog:probe:{REGION}"
+    POLL_SECONDS = 30
+
+    # Write the probe key — if Redis is up this always succeeds
+    try:
+        _redis.set(PROBE_KEY, "1")
+    except Exception:
+        pass
+
+    while True:
+        time.sleep(POLL_SECONDS)
+        try:
+            if not _redis.exists(PROBE_KEY):
+                print(f"[validation-service] Redis probe key missing for '{REGION}' — re-seeding capacity")
+                _seed_redis_capacity()
+                _redis.set(PROBE_KEY, "1")
+        except Exception as exc:
+            print(f"[validation-service] Redis watchdog error: {exc}")
+
+
 @app.on_event("startup")
 def start_consumers():
-    _seed_redis_capacity()
-    for fn in (_booking_consumer_loop, _release_consumer_loop):
+    for fn in (_seed_redis_capacity, _booking_consumer_loop, _release_consumer_loop, _redis_watchdog):
         t = threading.Thread(target=fn, daemon=True)
         t.start()

@@ -19,6 +19,7 @@ COPY services/data/data_client.py /app/data/data_service.py
 # Copy service code
 COPY services/authority-service/ /app/
 
+ENV PYTHONUNBUFFERED=1
 ENV SERVICE_NAME=authority-service
 
 EXPOSE 8000

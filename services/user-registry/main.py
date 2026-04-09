@@ -4,23 +4,28 @@ import bcrypt
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from datetime import datetime
+from pymongo import MongoClient
 
 sys.path.insert(0, "/app/shared")
 
 app = FastAPI(title="User Registry")
 
-SERVICE_NAME = os.getenv("SERVICE_NAME", "user-registry")
-REGION = os.getenv("REGION", "local")
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-JWT_SECRET = os.getenv("JWT_SECRET", "changeme")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+SERVICE_NAME   = os.getenv("SERVICE_NAME", "user-registry")
+REGION         = os.getenv("REGION", "local")
+MONGO_URI      = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+JWT_SECRET     = os.getenv("JWT_SECRET", "changeme")
+JWT_ALGORITHM  = os.getenv("JWT_ALGORITHM", "HS256")
+
+# Shared connection pool — one client for the lifetime of the process
+_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
+_db     = _client["traffic"]
 
 
 class RegisterRequest(BaseModel):
-    username: str
-    password: str
+    username:   str
+    password:   str
     vehicle_id: str
-    role: str = "DRIVER"
+    role:       str = "DRIVER"
 
 
 class LoginRequest(BaseModel):
@@ -36,14 +41,11 @@ def health():
 @app.post("/auth/register", status_code=201)
 def register(req: RegisterRequest):
     """Register a new driver and vehicle. Password is bcrypt-hashed before storage."""
-    from pymongo import MongoClient
     try:
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
-        db = client["traffic"]
-        if db.users.find_one({"username": req.username}):
+        if _db.users.find_one({"username": req.username}):
             raise HTTPException(status_code=409, detail="Username already exists")
         hashed = bcrypt.hashpw(req.password.encode(), bcrypt.gensalt()).decode()
-        db.users.insert_one({
+        _db.users.insert_one({
             "username":   req.username,
             "password":   hashed,
             "vehicle_id": req.vehicle_id,
@@ -60,12 +62,9 @@ def register(req: RegisterRequest):
 @app.post("/auth/login")
 def login(req: LoginRequest):
     """Validate credentials (bcrypt) and issue a JWT."""
-    from pymongo import MongoClient
     from auth import create_token
     try:
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
-        db = client["traffic"]
-        user = db.users.find_one({"username": req.username})
+        user = _db.users.find_one({"username": req.username})
         if not user or not bcrypt.checkpw(req.password.encode(), user["password"].encode()):
             raise HTTPException(status_code=401, detail="Invalid credentials")
         role = user.get("role", "DRIVER")

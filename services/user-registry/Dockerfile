@@ -16,6 +16,7 @@ COPY shared/ /app/shared/
 # Copy service code
 COPY services/user-registry/ /app/
 
+ENV PYTHONUNBUFFERED=1
 ENV SERVICE_NAME=user-registry
 
 EXPOSE 8000
