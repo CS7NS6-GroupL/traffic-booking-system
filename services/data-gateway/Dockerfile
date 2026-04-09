@@ -16,6 +16,7 @@ COPY shared/ /app/shared/
 # Copy service code
 COPY services/data-gateway/ /app/
 
+ENV PYTHONUNBUFFERED=1
 ENV SERVICE_NAME=data-gateway
 
 EXPOSE 8000

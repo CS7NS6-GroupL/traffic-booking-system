@@ -20,6 +20,7 @@ COPY services/data/data_client.py /app/data/data_service.py
 COPY services/validation-service/ /app/
 
 ENV SERVICE_NAME=validation-service
+ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

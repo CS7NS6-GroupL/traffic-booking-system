@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY services/data/data_service.py .
 COPY services/data/main.py .
 
+ENV PYTHONUNBUFFERED=1
 ENV SERVICE_NAME=data-service
 
 EXPOSE 8009

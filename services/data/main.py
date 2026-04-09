@@ -18,38 +18,7 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "data-service")
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "service": SERVICE_NAME,
-        "region": REGION,
-        "redis": ds.redis_available(),
-    }
-
-
-# =============================================================================
-# Segment validation (batched — one call per booking)
-# =============================================================================
-
-class SegmentValidateBody(BaseModel):
-    segments:   list[dict[str, str]]
-    vehicle_id: str
-
-
-class SegmentReleaseBody(BaseModel):
-    segments: list[dict[str, str]]
-
-
-@app.post("/segments/validate")
-def validate_segments(body: SegmentValidateBody):
-    """Acquire locks, check capacity, check duplicate, increment counters."""
-    return ds.validate_and_reserve(body.segments, body.vehicle_id)
-
-
-@app.post("/segments/release")
-def release_segments(body: SegmentReleaseBody):
-    """Decrement counters for cancelled or rolled-back bookings."""
-    ds.release_segments(body.segments)
-    return {"ok": True}
+    return {"status": "ok", "service": SERVICE_NAME, "region": REGION}
 
 
 # =============================================================================

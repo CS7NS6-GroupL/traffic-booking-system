@@ -247,6 +247,19 @@
       <div id="authority-panel" class="d-none">
         <div class="row g-3">
 
+          <!-- Region selector -->
+          <div class="col-12">
+            <div class="d-flex align-items-center gap-3">
+              <span style="color:#8b949e;font-size:0.85rem">Region:</span>
+              <div class="btn-group btn-group-sm" id="region-selector">
+                <button class="btn btn-outline-secondary active" onclick="selectRegion('laos',this)">Laos</button>
+                <button class="btn btn-outline-secondary" onclick="selectRegion('cambodia',this)">Cambodia</button>
+                <button class="btn btn-outline-secondary" onclick="selectRegion('andorra',this)">Andorra</button>
+              </div>
+              <span id="selected-region-label" style="color:#8957e5;font-size:0.8rem">— viewing laos authority</span>
+            </div>
+          </div>
+
           <!-- Vehicle lookup -->
           <div class="col-md-6">
             <div class="card">
@@ -306,7 +319,7 @@
     <!-- ══════════════════════════ SYSTEM HEALTH TAB ═════════════════════════ -->
     <div id="tab-health" class="d-none">
       <div class="d-flex justify-content-between align-items-center mb-3">
-        <span class="section-title mb-0">12 application services across 3 regions — pinging /health</span>
+        <span class="section-title mb-0">18 application services across 3 regions + 6 global — pinging /health</span>
         <button class="btn btn-sm" style="color:#388bfd;background:none;border:1px solid #388bfd;padding:2px 14px;font-size:0.75rem" onclick="checkHealth()">
           <i class="bi bi-arrow-clockwise me-1"></i>Refresh All
         </button>
@@ -572,6 +585,15 @@ async function cancelJourney(id) {
 }
 
 // ── Authority ─────────────────────────────────────────────────────────────────
+let authorityRegion = 'laos';
+
+function selectRegion(r, btn) {
+  authorityRegion = r;
+  document.querySelectorAll('#region-selector .btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('selected-region-label').textContent = `— viewing ${r} authority`;
+}
+
 function refreshAuthorityGate() {
   const show = role === 'AUTHORITY';
   document.getElementById('auth-gate').classList.toggle('d-none', show);
@@ -584,9 +606,9 @@ async function lookupVehicle() {
   const out = document.getElementById('veh-result');
   out.innerHTML = '<div style="color:#8b949e;font-size:0.83rem">Searching…</div>';
   try {
-    const d = await api(`/api/authority/bookings/${vid}`);
+    const d = await api(`/api/authority/${authorityRegion}/bookings/${vid}`);
     const bookings = d.bookings || [];
-    if (!bookings.length) { out.innerHTML = `<div style="color:#8b949e;font-size:0.83rem">No bookings for ${vid}</div>`; return; }
+    if (!bookings.length) { out.innerHTML = `<div style="color:#8b949e;font-size:0.83rem">No bookings for ${vid} in ${authorityRegion}</div>`; return; }
     out.innerHTML = bookings.map(b => `
       <div class="d-flex justify-content-between align-items-center p-2 mb-1 rounded" style="background:#1c2128;border:1px solid #30363d;font-size:0.8rem">
         <span class="mono">${b.booking_id}</span>
@@ -598,7 +620,7 @@ async function lookupVehicle() {
 
 async function loadAudit() {
   try {
-    const d = await api('/api/authority/audit');
+    const d = await api(`/api/authority/${authorityRegion}/audit`);
     const records = d.audit_records || [];
     const tbody = document.getElementById('audit-tbody');
     if (!records.length) {
@@ -623,63 +645,112 @@ async function flagBooking() {
   const reason = document.getElementById('flag-reason').value;
   if (!id) return;
   try {
-    const d = await api(`/api/authority/flag/${id}`, { method:'POST', body: JSON.stringify({ reason }) });
-    msg('flag-msg', `Booking <strong>${id}</strong> flagged`);
+    const d = await api(`/api/authority/${authorityRegion}/flag/${id}`, { method:'POST', body: JSON.stringify({ reason }) });
+    msg('flag-msg', `Booking <strong>${id}</strong> flagged in ${authorityRegion}`);
   } catch(e) { msg('flag-msg', e.detail, true); }
 }
 
 // ── Health ────────────────────────────────────────────────────────────────────
-const SERVICES = [
-  // Global services
-  { name:'Booking Service',           path:'/api/health/booking',        desc:'Entry point — JWT + Kafka producer' },
-  { name:'User Registry',             path:'/api/health/user',           desc:'Global auth — register, login, JWT' },
-  { name:'Authority Service',         path:'/api/health/authority',      desc:'AUTHORITY-only audit & enforcement' },
-  { name:'Data Gateway',              path:'/api/health/gateway',        desc:'Cross-region HTTP + Atlas fallback' },
-  { name:'Notification Service',      path:'/api/health/notification',   desc:'WebSocket push, Kafka consumer' },
-  { name:'Journey Management',        path:'/api/health/journey',        desc:'Overlay planner + saga coordinator' },
-  { name:'Data Service',              path:'/api/health/data',           desc:'Centralised MongoDB + Redis access layer' },
-  // Laos cluster
-  { name:'Route Service (Laos)',       path:'/api/health/route-laos',          desc:'A* routing — Laos' },
-  { name:'Validation Service (Laos)',  path:'/api/health/validation-laos',     desc:'Kafka consumer, Redis capacity — Laos' },
-  // Cambodia cluster
-  { name:'Route Service (Cambodia)',   path:'/api/health/route-cambodia',      desc:'A* routing — Cambodia' },
-  { name:'Validation Service (Cambodia)', path:'/api/health/validation-cambodia', desc:'Kafka consumer, Redis capacity — Cambodia' },
-  // Andorra cluster (isolated)
-  { name:'Route Service (Andorra)',    path:'/api/health/route-andorra',       desc:'A* routing — Andorra' },
-  { name:'Validation Service (Andorra)', path:'/api/health/validation-andorra', desc:'Kafka consumer, Redis capacity — Andorra' },
+const SERVICE_GROUPS = [
+  {
+    label: 'Global',
+    color: '#388bfd',
+    services: [
+      { name:'Booking Service',       path:'/api/health/booking',     desc:'Entry point — JWT + Kafka producer' },
+      { name:'User Registry',         path:'/api/health/user',        desc:'Global auth — register, login, JWT' },
+      { name:'Journey Management',    path:'/api/health/journey',     desc:'Overlay planner + saga coordinator' },
+      { name:'Notification Service',  path:'/api/health/notification',desc:'WebSocket push, Kafka consumer' },
+      { name:'Data Gateway',          path:'/api/health/gateway',     desc:'Cross-region HTTP + Atlas fallback' },
+      { name:'Data Service',          path:'/api/health/data',        desc:'Saga storage — global MongoDB' },
+    ],
+  },
+  {
+    label: 'Laos',
+    color: '#d29922',
+    services: [
+      { name:'Route Service',      path:'/api/health/route-laos',       desc:'A* routing on OSM graph' },
+      { name:'Validation Service', path:'/api/health/validation-laos',  desc:'Kafka consumer, Redis capacity locks' },
+      { name:'Authority Service',  path:'/api/health/authority-laos',   desc:'AUTHORITY-only audit & enforcement' },
+      { name:'Data Service',       path:'/api/health/data-laos',        desc:'Booking storage — Laos MongoDB' },
+    ],
+  },
+  {
+    label: 'Cambodia',
+    color: '#3fb950',
+    services: [
+      { name:'Route Service',      path:'/api/health/route-cambodia',      desc:'A* routing on OSM graph' },
+      { name:'Validation Service', path:'/api/health/validation-cambodia', desc:'Kafka consumer, Redis capacity locks' },
+      { name:'Authority Service',  path:'/api/health/authority-cambodia',  desc:'AUTHORITY-only audit & enforcement' },
+      { name:'Data Service',       path:'/api/health/data-cambodia',       desc:'Booking storage — Cambodia MongoDB' },
+    ],
+  },
+  {
+    label: 'Andorra',
+    color: '#8957e5',
+    services: [
+      { name:'Route Service',      path:'/api/health/route-andorra',      desc:'A* routing on OSM graph' },
+      { name:'Validation Service', path:'/api/health/validation-andorra', desc:'Kafka consumer, Redis capacity locks' },
+      { name:'Authority Service',  path:'/api/health/authority-andorra',  desc:'AUTHORITY-only audit & enforcement' },
+      { name:'Data Service',       path:'/api/health/data-andorra',       desc:'Booking storage — Andorra MongoDB' },
+    ],
+  },
 ];
 
 async function checkHealth() {
   const grid = document.getElementById('health-grid');
-  grid.innerHTML = SERVICES.map((s, i) => `
-    <div class="col-xl-3 col-md-4 col-sm-6">
-      <div class="card health-card" id="hcard-${i}">
-        <div class="card-body py-3">
-          <div class="d-flex align-items-center gap-2 mb-1">
-            <span class="dot dot-checking" id="hdot-${i}"></span>
-            <strong style="font-size:0.85rem">${s.name}</strong>
-          </div>
-          <div style="font-size:0.72rem;color:#8b949e;margin-bottom:6px">${s.desc}</div>
-          <div id="hinfo-${i}" style="font-size:0.72rem;color:#484f58">checking…</div>
-        </div>
+
+  // Assign global indices for DOM IDs
+  let idx = 0;
+  const allServices = [];
+  SERVICE_GROUPS.forEach(g => g.services.forEach(s => { s._idx = idx++; allServices.push(s); }));
+
+  grid.innerHTML = SERVICE_GROUPS.map(g => `
+    <div class="col-12">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;margin-top:4px">
+        <span style="font-size:0.7rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:${g.color};border:1px solid ${g.color};border-radius:4px;padding:1px 8px">${g.label}</span>
+        <span id="hgroup-summary-${g.label}" style="font-size:0.72rem;color:#484f58">checking…</span>
+      </div>
+      <div class="row g-2">
+        ${g.services.map(s => `
+          <div class="col-xl-3 col-md-4 col-sm-6">
+            <div class="card health-card" id="hcard-${s._idx}">
+              <div class="card-body py-3">
+                <div class="d-flex align-items-center gap-2 mb-1">
+                  <span class="dot dot-checking" id="hdot-${s._idx}"></span>
+                  <strong style="font-size:0.85rem">${s.name}</strong>
+                </div>
+                <div style="font-size:0.72rem;color:#8b949e;margin-bottom:6px">${s.desc}</div>
+                <div id="hinfo-${s._idx}" style="font-size:0.72rem;color:#484f58">checking…</div>
+              </div>
+            </div>
+          </div>`).join('')}
       </div>
     </div>`).join('');
 
-  await Promise.all(SERVICES.map(async (s, i) => {
-    const t0 = Date.now();
-    try {
-      const d = await fetch(s.path).then(r => r.json());
-      const ms = Date.now() - t0;
-      document.getElementById(`hdot-${i}`).className = 'dot dot-up';
-      document.getElementById(`hcard-${i}`).classList.add('up');
-      document.getElementById(`hinfo-${i}`).innerHTML =
-        `<span style="color:#3fb950">online</span> <span style="color:#484f58">${ms}ms</span>` +
-        (d.region ? ` · <span style="color:#8b949e">${d.region}</span>` : '');
-    } catch {
-      document.getElementById(`hdot-${i}`).className = 'dot dot-down';
-      document.getElementById(`hcard-${i}`).classList.add('down');
-      document.getElementById(`hinfo-${i}`).innerHTML = '<span style="color:#f85149">offline</span>';
-    }
+  await Promise.all(SERVICE_GROUPS.map(async g => {
+    const results = await Promise.all(g.services.map(async s => {
+      const t0 = Date.now();
+      try {
+        const d = await fetch(s.path).then(r => r.json());
+        const ms = Date.now() - t0;
+        document.getElementById(`hdot-${s._idx}`).className = 'dot dot-up';
+        document.getElementById(`hcard-${s._idx}`).classList.add('up');
+        document.getElementById(`hinfo-${s._idx}`).innerHTML =
+          `<span style="color:#3fb950">online</span> <span style="color:#484f58">${ms}ms</span>` +
+          (d.service ? ` · <span style="color:#8b949e;font-size:0.7rem">${d.service}</span>` : '');
+        return true;
+      } catch {
+        document.getElementById(`hdot-${s._idx}`).className = 'dot dot-down';
+        document.getElementById(`hcard-${s._idx}`).classList.add('down');
+        document.getElementById(`hinfo-${s._idx}`).innerHTML = '<span style="color:#f85149">offline</span>';
+        return false;
+      }
+    }));
+    const up = results.filter(Boolean).length;
+    const total = results.length;
+    const allUp = up === total;
+    document.getElementById(`hgroup-summary-${g.label}`).innerHTML =
+      `<span style="color:${allUp ? '#3fb950' : up === 0 ? '#f85149' : '#d29922'}">${up}/${total} up</span>`;
   }));
 }
 

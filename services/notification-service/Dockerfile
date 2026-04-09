@@ -16,6 +16,7 @@ COPY shared/ /app/shared/
 # Copy service code
 COPY services/notification-service/ /app/
 
+ENV PYTHONUNBUFFERED=1
 ENV SERVICE_NAME=notification-service
 
 EXPOSE 8000
