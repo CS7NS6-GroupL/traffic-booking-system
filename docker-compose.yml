@@ -380,6 +380,8 @@ services:
       ANDORRA_ROUTE_URL: http://route-service-andorra:8000
       LAOS_ROUTE_URL: http://route-service-laos:8000
       CAMBODIA_ROUTE_URL: http://route-service-cambodia:8000
+      GATEWAY_LAOS_EXIT: border-laos-camb
+      GATEWAY_CAMBODIA_ENTRY: border-camb-laos
     depends_on:
       kafka:
         condition: service_healthy
