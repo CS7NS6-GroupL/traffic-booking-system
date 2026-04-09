@@ -31,6 +31,12 @@ def get_vehicle_booking(vehicle_id: str):
     return result or {}
 
 
+@app.get("/bookings/vehicle/{vehicle_id}/all")
+def get_all_vehicle_bookings(vehicle_id: str):
+    """Return all bookings for a vehicle regardless of status (for authority use)."""
+    return ds.get_bookings_by_vehicle(vehicle_id)
+
+
 @app.post("/bookings")
 def insert_booking(booking: dict[str, Any]):
     ds.insert_booking(booking)
@@ -58,6 +64,12 @@ def get_all_bookings(limit: int = 50):
 @app.patch("/bookings/{booking_id}/cancel")
 def cancel_booking(booking_id: str, cancelled_at: str):
     ds.cancel_booking_record(booking_id, cancelled_at)
+    return {"ok": True}
+
+
+@app.patch("/bookings/{booking_id}/flag")
+def flag_booking(booking_id: str, reason: str = ""):
+    ds.flag_booking_record(booking_id, reason)
     return {"ok": True}
 
 

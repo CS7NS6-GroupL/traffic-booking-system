@@ -55,6 +55,7 @@ ROAD_TYPE_CAPACITY = {
     "secondary_link":    40,
     "tertiary":          50,
     "tertiary_link":     25,
+    "track":              1,   # single-vehicle mountain lane — demo capacity limit
 }
 
 _redis = redis_lib.from_url(REDIS_URL, decode_responses=True)
@@ -103,7 +104,8 @@ def validate_and_reserve(segments: list[dict], vehicle_id: str) -> dict:
             acquired.append((seg["from"], seg["to"]))
 
         for seg in sorted_segs:
-            cap = int(_redis.get(_cap_key(seg["from"], seg["to"])) or 100)
+            raw_cap = _redis.get(_cap_key(seg["from"], seg["to"]))
+            cap = int(raw_cap) if raw_cap is not None else 0  # 0 = block if unseeded
             cur = int(_redis.get(_cur_key(seg["from"], seg["to"])) or 0)
             if cur >= cap:
                 return {
@@ -145,17 +147,11 @@ def release_segments(segments: list[dict]):
 
 def _message_segments(message: dict) -> list[dict]:
     segments = message.get("segments") or []
-    if segments:
-        return [
-            {"from": seg.get("from"), "to": seg.get("to")}
-            for seg in segments
-            if seg.get("from") and seg.get("to")
-        ]
-    origin      = message.get("origin")
-    destination = message.get("destination")
-    if origin and destination:
-        return [{"from": origin, "to": destination}]
-    return []
+    return [
+        {"from": seg.get("from"), "to": seg.get("to")}
+        for seg in segments
+        if seg.get("from") and seg.get("to")
+    ]
 
 
 # =============================================================================
@@ -174,6 +170,22 @@ def health():
 @app.get("/validation/status")
 def status():
     return {"consumer_group": f"validation-group-{REGION}", "topic": "booking-requests", "region": REGION}
+
+
+@app.post("/internal/reset-counters")
+def reset_counters():
+    """
+    Reset all current:segment:* counters to 0.
+    Capacity limits (capacity:segment:*) are preserved.
+    For load testing / demo resets only — not for production use.
+    """
+    keys = _redis.keys("current:segment:*")
+    if keys:
+        pipe = _redis.pipeline(transaction=False)
+        for k in keys:
+            pipe.set(k, 0)
+        pipe.execute()
+    return {"reset": len(keys), "region": REGION}
 
 
 # =============================================================================
@@ -199,11 +211,14 @@ def _validate_and_publish(message: dict, producer):
             result  = validate_and_reserve(segments, vehicle_id)
             outcome = result["outcome"]
             reason  = result["reason"]
-            if outcome == "APPROVED" and not saga_id:
+            if not saga_id:
                 ds.insert_booking({
                     **{k: v for k, v in message.items() if k != "_id"},
-                    "status":      "approved",
-                    "approved_at": now_utc_iso(),
+                    "status":      outcome.lower(),
+                    "approved_at": now_utc_iso() if outcome == "APPROVED" else None,
+                    "rejected_at": now_utc_iso() if outcome == "REJECTED" else None,
+                    "reject_reason": reason if outcome == "REJECTED" else None,
+                    "region":      REGION,   # override booking-service's region with actual processing region
                 })
     except Exception as exc:
         outcome = "REJECTED"

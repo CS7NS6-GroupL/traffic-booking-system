@@ -46,6 +46,34 @@ COUNTRY_TO_REGION: dict[str, str] = {
     "Cambodia": "cambodia",
 }
 
+# Custom graph node IDs → region. Avoids Nominatim geocoding for known node IDs.
+NODE_ID_TO_REGION: dict[str, str] = {
+    # Andorra
+    "and-andorra-la-vella": "andorra",
+    "and-escaldes":         "andorra",
+    "and-encamp":           "andorra",
+    "and-canillo":          "andorra",
+    "and-ordino":           "andorra",
+    "and-sant-julia":       "andorra",
+    "and-la-massana":       "andorra",
+    "and-arinsal":          "andorra",
+    # Laos
+    "laos-vientiane":       "laos",
+    "laos-luang-prabang":   "laos",
+    "laos-pakse":           "laos",
+    "laos-savannakhet":     "laos",
+    "laos-thakhek":         "laos",
+    "border-laos-camb":     "laos",
+    # Cambodia
+    "khm-phnom-penh":       "cambodia",
+    "khm-siem-reap":        "cambodia",
+    "khm-battambang":       "cambodia",
+    "khm-kompong-cham":     "cambodia",
+    "khm-stung-treng":      "cambodia",
+    "khm-kratie":           "cambodia",
+    "border-camb-laos":     "cambodia",
+}
+
 app = FastAPI(title="Journey Management Service")
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "journey-management")
@@ -160,18 +188,18 @@ def _get_bookings_by_driver_all_regions(driver_id: str) -> list:
     return sorted(all_bookings, key=lambda b: b.get("created_at", ""), reverse=True)
 
 
-def _cancel_booking_in_region(booking_id: str, cancelled_at: str):
-    """Find and cancel a booking in whichever regional data-service holds it."""
-    for region, url in REGION_DATA_SERVICES.items():
-        try:
-            with httpx.Client(timeout=5.0) as c:
-                r = c.patch(f"{url}/bookings/{booking_id}/cancel",
-                            params={"cancelled_at": cancelled_at})
-                if r.status_code == 200:
-                    return True
-        except Exception:
-            pass
-    return False
+def _cancel_booking_in_region(booking_id: str, cancelled_at: str, region: str):
+    """Cancel a booking in the specific regional data-service that holds it."""
+    url = REGION_DATA_SERVICES.get(region)
+    if not url:
+        return False
+    try:
+        with httpx.Client(timeout=5.0) as c:
+            r = c.patch(f"{url}/bookings/{booking_id}/cancel",
+                        params={"cancelled_at": cancelled_at})
+            return r.status_code == 200
+    except Exception:
+        return False
 
 
 # ── Overlay routing helpers ───────────────────────────────────────────────────
@@ -199,9 +227,12 @@ def _overlay_shortest_path(origin_region: str, dest_region: str) -> list[str]:
 
 def _region_for_place(place: str) -> str:
     """
-    Geocode a place name with Nominatim and map the country to a region.
+    Resolve a place name or custom node ID to a region name.
+    Custom graph node IDs are resolved without any Nominatim call.
     Raises HTTP 422 if the place is unknown or in an unserved country.
     """
+    if place in NODE_ID_TO_REGION:
+        return NODE_ID_TO_REGION[place]
     try:
         location = _geocoder.geocode(place, addressdetails=True, timeout=10, language="en")
     except GeocoderTimedOut:
@@ -560,14 +591,14 @@ def cancel_journey(booking_id: str, authorization: str = Header(...)):
     import sys; sys.path.insert(0, "/app/data")
     import data_service as ds
     try:
-        booking, _ = _find_booking_across_regions(booking_id)
+        booking, booking_region = _find_booking_across_regions(booking_id)
         if not booking:
             raise HTTPException(status_code=404, detail="Booking not found")
         if booking.get("driver_id") != payload.get("sub"):
             raise HTTPException(status_code=403, detail="Not your booking")
         if booking.get("status") == "cancelled":
             raise HTTPException(status_code=409, detail="Already cancelled")
-        _cancel_booking_in_region(booking_id, datetime.utcnow().isoformat())
+        _cancel_booking_in_region(booking_id, datetime.utcnow().isoformat(), booking_region)
     except HTTPException:
         raise
     except Exception as exc:

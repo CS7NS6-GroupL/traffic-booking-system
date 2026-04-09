@@ -18,17 +18,22 @@ BOOKING-SERVICE
     │         {origin, destination}
     ▼
 JOURNEY-MANAGEMENT  /plan
-    │  1. Geocode origin  → Nominatim → country → COUNTRY_TO_REGION → "laos"
-    │  2. Geocode dest    → Nominatim → country → COUNTRY_TO_REGION → "laos"
+    │  1. Resolve origin region:
+    │       if place in NODE_ID_TO_REGION → direct lookup, no Nominatim call
+    │       else → Nominatim → country → COUNTRY_TO_REGION → "laos"
+    │  2. Resolve dest region (same logic)
     │  3. Dijkstra on OVERLAY graph → region_sequence = ["laos"]
     │  4. HTTP GET → route-service-laos:8000/routes
-    │         ?origin=Vientiane&destination=Luang Prabang
+    │         ?origin=laos-vientiane&destination=laos-savannakhet
     ▼
 ROUTE-SERVICE-LAOS  /routes
-    │  1. Resolve "Vientiane" → Nominatim → (lat,lng) → mongo-laos 2dsphere
-    │         nearest node in osm_nodes WHERE region=laos
-    │  2. Resolve "Luang Prabang" → same
-    │  3. A* on in-memory graph (loaded from mongo-laos osm_edges at startup)
+    │  1. Resolve origin:
+    │       if place in node_coords (custom node ID) → return directly, no Nominatim
+    │       elif numeric → treat as OSM node ID
+    │       else → Nominatim → (lat,lng) → mongo-laos 2dsphere nearest node
+    │  2. Resolve destination (same logic)
+    │  3. A* on in-memory graph (loaded from mongo-laos osm_edges at startup,
+    │         ALL road types loaded — no MAJOR_ROADS filter for custom graph)
     │         adjacency[node][neighbor] = distance_km
     │         heuristic = haversine(node, dest)
     │  4. Return {segments: [{from, to, distance_km, region}, ...], path, total_km}
@@ -58,9 +63,10 @@ VALIDATION-SERVICE-LAOS
     │  1. Sort segments by lock key (deadlock prevention)
     │  2. For each segment: Redis SET NX lock:segment:{f}:{t} TTL=10s  (redis-laos)
     │     → if any fail: REJECTED "lock contention"
-    │  3. For each segment: Redis GET capacity:segment:{f}:{t} (default 100)
+    │  3. For each segment: Redis GET capacity:segment:{f}:{t}
+    │                          → None (unseeded) → cap=0 → REJECTED immediately
     │                        Redis GET current:segment:{f}:{t}
-    │     → if cur >= cap: REJECTED "at full capacity"
+    │     → if cur >= cap: REJECTED "at full capacity ({cur}/{cap})"
     │  4. HTTP GET → data-service-laos:8009/bookings/vehicle/{vehicle_id}
     │     → MongoDB find_one bookings WHERE vehicle_id=X AND status IN [approved,pending]
     │     → if found: REJECTED "vehicle already has active booking"
@@ -68,10 +74,11 @@ VALIDATION-SERVICE-LAOS
     │  6. Release all locks (reverse order, in finally block)
     │  7. Return {outcome: "APPROVED", reason: "..."}
     │
-    │  If APPROVED (and not a sub-booking):
+    │  If not a sub-booking (single-region final result):
     │    HTTP POST → data-service-laos:8009/bookings
-    │      {booking_id, ..., status:"approved", approved_at}
-    │      → writes to mongo-laos  (regional booking storage)
+    │      APPROVED: {booking_id, ..., status:"approved", approved_at}
+    │      REJECTED: {booking_id, ..., status:"rejected", rejected_at, reject_reason}
+    │      → writes to mongo-laos  (regional booking storage, both outcomes)
     │
     │  Produce to Kafka topic "booking-outcomes":
     │    {booking_id, driver_id, outcome:"APPROVED", region:"laos"}
@@ -106,16 +113,16 @@ BOOKING-SERVICE
     │  3. HTTP POST → journey-management /plan
     ▼
 JOURNEY-MANAGEMENT  /plan
-    │  1. Geocode "Pakse, Laos"     → "laos"
-    │  2. Geocode "Siem Reap, Cam." → "cambodia"
+    │  1. "laos-pakse"    → NODE_ID_TO_REGION → "laos"    (no Nominatim)
+    │  2. "khm-phnom-penh" → NODE_ID_TO_REGION → "cambodia" (no Nominatim)
     │  3. Dijkstra on OVERLAY:
     │       laos → cambodia (cost 600km, via gateway nodes)
     │       region_sequence = ["laos", "cambodia"]
     │  4. Build legs:
     │     Leg 1: HTTP GET → route-service-laos
-    │               origin="Pakse", dest=GATEWAY_LAOS_EXIT (node 325778714)
+    │               origin="laos-pakse", dest=GATEWAY_LAOS_EXIT ("border-laos-camb")
     │     Leg 2: HTTP GET → route-service-cambodia
-    │               origin=GATEWAY_CAMBODIA_ENTRY (node 5178604282), dest="Siem Reap"
+    │               origin=GATEWAY_CAMBODIA_ENTRY ("border-camb-laos"), dest="khm-phnom-penh"
     │  5. Returns plan:
     │       {is_cross_region: true,
     │        segments_by_region: {"laos":[...], "cambodia":[...]},
@@ -239,6 +246,15 @@ AUTHORITY-SERVICE-{REGION}
     │     authority-service-cambodia → data-service-cambodia → mongo-cambodia
     │     authority-service-andorra → data-service-andorra → mongo-andorra
     │
+    │  Vehicle lookup: GET /authority/bookings/{vehicle_id}
+    │    → data-service /bookings/vehicle/{id}/all  (all statuses incl. flagged/rejected)
+    │
+    │  Flag booking: POST /authority/flag/{booking_id}  {reason}
+    │    → data-service PATCH /bookings/{id}/flag?reason=...
+    │         sets status="flagged", flagged_reason, flagged_at on the booking doc
+    │    → data-service POST /flags  (separate flags collection entry)
+    │    → data-service POST /audit  (audit_logs collection entry)
+    │
     │  Each authority can ONLY see bookings stored in its own region.
     │  Regional isolation is enforced by the data-service URL — there is no
     │  global booking index accessible to any authority instance.
@@ -248,13 +264,13 @@ AUTHORITY-SERVICE-{REGION}
 
 ## Booking Storage Summary
 
-| Booking type | Written by | Written to | MongoDB instance |
-|---|---|---|---|
-| Single-region Laos | validation-service-laos | data-service-laos `/bookings` | mongo-laos |
-| Single-region Cambodia | validation-service-cambodia | data-service-cambodia `/bookings` | mongo-cambodia |
-| Single-region Andorra | validation-service-andorra | data-service-andorra `/bookings` | mongo-andorra |
-| Cross-region saga (commit) | journey-management `_advance_saga` | data-service-{**origin region**} `/bookings` | mongo-{origin} |
-| Saga metadata | journey-management `/sagas` | data-service (global) `/sagas` | mongo (global) |
+| Booking type | Status saved | Written by | Written to | MongoDB instance |
+|---|---|---|---|---|
+| Single-region Laos | approved **and** rejected | validation-service-laos | data-service-laos `/bookings` | mongo-laos |
+| Single-region Cambodia | approved **and** rejected | validation-service-cambodia | data-service-cambodia `/bookings` | mongo-cambodia |
+| Single-region Andorra | approved **and** rejected | validation-service-andorra | data-service-andorra `/bookings` | mongo-andorra |
+| Cross-region saga (commit) | approved | journey-management `_advance_saga` | data-service-{**origin region**} `/bookings` | mongo-{origin} |
+| Saga metadata | PENDING/COMMITTED/ABORTED | journey-management `/sagas` | data-service (global) `/sagas` | mongo (global) |
 
 **Known limitation:** single-region validation checks for duplicate vehicles only in the booking's own regional MongoDB. A vehicle booked in Laos would not be seen by Cambodia's validation-service for a separate single-region Cambodia booking. Cross-region sagas handle this correctly — each region independently rejects if the vehicle has an active booking in its own DB, and any single rejection aborts the saga.
 
@@ -273,7 +289,7 @@ AUTHORITY-SERVICE-{REGION}
 | Key | Type | Purpose |
 |---|---|---|
 | `lock:segment:{from}:{to}` | String | Distributed mutex (SET NX, TTL 10s) |
-| `capacity:segment:{from}:{to}` | String | Max vehicles on segment (seeded from osm_edges) |
+| `capacity:segment:{from}:{to}` | String | Max vehicles on segment (seeded from osm_edges road_type). Missing key → treated as 0 (blocks all bookings until seeded) |
 | `current:segment:{from}:{to}` | String | Current vehicle count |
 | `watchdog:probe:{region}` | String | Auto-reseed trigger key |
 

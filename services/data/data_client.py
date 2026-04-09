@@ -62,8 +62,7 @@ def get_booking_by_id(booking_id: str) -> dict | None:
 
 
 def get_bookings_by_vehicle(vehicle_id: str) -> list:
-    result = _get(f"/bookings/vehicle/{vehicle_id}")
-    return [result["booking"]] if result and result.get("booking") else []
+    return _get(f"/bookings/vehicle/{vehicle_id}/all") or []
 
 
 def get_bookings_by_driver(driver_id: str) -> list:
@@ -76,6 +75,11 @@ def get_all_bookings(limit: int = 50) -> list:
 
 def cancel_booking_record(booking_id: str, cancelled_at: str):
     r = _client.patch(f"/bookings/{booking_id}/cancel", params={"cancelled_at": cancelled_at})
+    r.raise_for_status()
+
+
+def flag_booking_record(booking_id: str, reason: str = ""):
+    r = _client.patch(f"/bookings/{booking_id}/flag", params={"reason": reason})
     r.raise_for_status()
 
 

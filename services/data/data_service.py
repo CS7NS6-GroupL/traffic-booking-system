@@ -97,6 +97,14 @@ def cancel_booking_record(booking_id: str, cancelled_at: str):
     )
 
 
+@_mongo_retry
+def flag_booking_record(booking_id: str, reason: str = ""):
+    db.bookings.update_one(
+        {"booking_id": booking_id},
+        {"$set": {"status": "flagged", "flagged_reason": reason, "flagged_at": now_utc_iso()}},
+    )
+
+
 # =============================================================================
 # Saga (MongoDB)
 # =============================================================================

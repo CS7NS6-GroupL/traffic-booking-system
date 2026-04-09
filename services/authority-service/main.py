@@ -79,6 +79,7 @@ def flag_booking(booking_id: str, body: FlagRequest = None, authorization: str =
         if not ds.get_booking_by_id(booking_id):
             raise HTTPException(status_code=404, detail="Booking not found")
         ds.insert_flag(booking_id, reason, REGION)
+        ds.flag_booking_record(booking_id, reason)
         ds.log_audit_event(
             action="flag_booking",
             actor_id=actor.get("sub", "unknown"),

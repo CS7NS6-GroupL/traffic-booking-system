@@ -275,6 +275,8 @@ services:
     restart: unless-stopped
     ports:
       - "8013:8000"
+    env_file:
+      - services/authority-service/.env
     environment:
       SERVICE_NAME: authority-service-laos
       REGION: laos
@@ -293,6 +295,8 @@ services:
     restart: unless-stopped
     ports:
       - "8023:8000"
+    env_file:
+      - services/authority-service/.env
     environment:
       SERVICE_NAME: authority-service-cambodia
       REGION: cambodia
@@ -311,6 +315,8 @@ services:
     restart: unless-stopped
     ports:
       - "8033:8000"
+    env_file:
+      - services/authority-service/.env
     environment:
       SERVICE_NAME: authority-service-andorra
       REGION: andorra

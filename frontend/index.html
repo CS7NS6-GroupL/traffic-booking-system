@@ -29,6 +29,7 @@
     .tag-pending   { background: #1a2b3b; color: #388bfd; border: 1px solid #1f6feb; }
     .tag-cancelled { background: #2d2d2d; color: #8b949e; border: 1px solid #484f58; }
     .tag-rejected  { background: #3b1a1a; color: #f85149; border: 1px solid #da3633; }
+    .tag-flagged   { background: #3b2a1a; color: #e3b341; border: 1px solid #9e6a03; }
     .tag-COMMITTED { background: #1a3b2a; color: #3fb950; border: 1px solid #2ea043; }
     .tag-PENDING   { background: #1a2b3b; color: #d29922; border: 1px solid #9e6a03; }
     .tag-ABORTED   { background: #3b1a1a; color: #f85149; border: 1px solid #da3633; }
@@ -164,6 +165,8 @@
                     </optgroup>
                     <optgroup label="Single-region (Andorra)">
                       <option value="Andorra la Vella, Andorra|Canillo, Andorra">Andorra la Vella → Canillo</option>
+                      <option value="La Massana, Andorra|Arinsal, Andorra">La Massana → Arinsal  ⚠ capacity 1</option>
+                      <option value="Arinsal, Andorra|La Massana, Andorra">Arinsal → La Massana  ⚠ capacity 1</option>
                     </optgroup>
                   </select>
                 </div>
@@ -352,7 +355,8 @@ async function api(path, opts = {}) {
 // ── Small UI helpers ──────────────────────────────────────────────────────────
 function tag(s) {
   const cls = { approved:'tag-approved', pending:'tag-pending', cancelled:'tag-cancelled',
-                rejected:'tag-rejected', COMMITTED:'tag-COMMITTED', PENDING:'tag-PENDING', ABORTED:'tag-ABORTED' };
+                rejected:'tag-rejected', flagged:'tag-flagged',
+                COMMITTED:'tag-COMMITTED', PENDING:'tag-PENDING', ABORTED:'tag-ABORTED' };
   return `<span class="tag ${cls[s] || 'tag-pending'}">${s}</span>`;
 }
 function regionBadges(arr) {
@@ -610,10 +614,13 @@ async function lookupVehicle() {
     const bookings = d.bookings || [];
     if (!bookings.length) { out.innerHTML = `<div style="color:#8b949e;font-size:0.83rem">No bookings for ${vid} in ${authorityRegion}</div>`; return; }
     out.innerHTML = bookings.map(b => `
-      <div class="d-flex justify-content-between align-items-center p-2 mb-1 rounded" style="background:#1c2128;border:1px solid #30363d;font-size:0.8rem">
-        <span class="mono">${b.booking_id}</span>
-        <span>${b.origin} → ${b.destination}</span>
-        ${tag(b.status)}
+      <div class="p-2 mb-1 rounded" style="background:#1c2128;border:1px solid #30363d;font-size:0.8rem">
+        <div class="d-flex justify-content-between align-items-center">
+          <span class="mono">${b.booking_id}</span>
+          <span>${b.origin} → ${b.destination}</span>
+          ${tag(b.status)}
+        </div>
+        ${b.flagged_reason ? `<div style="font-size:0.72rem;color:#e3b341;margin-top:3px">⚑ ${b.flagged_reason}</div>` : ''}
       </div>`).join('');
   } catch(e) { out.innerHTML = `<div style="color:#f85149;font-size:0.8rem">${e.detail}</div>`; }
 }
@@ -634,7 +641,7 @@ async function loadAudit() {
         <td>${b.vehicle_id || '—'}</td>
         <td>${(b.origin||'?')} → ${(b.destination||'?')}</td>
         <td>${regionBadges(b.regions_involved || (b.region ? [b.region] : []))}</td>
-        <td>${tag(b.status)}</td>
+        <td>${tag(b.status)}${b.flagged_reason ? `<br><span style="font-size:0.7rem;color:#e3b341;opacity:0.85" title="${b.flagged_reason}">⚑ ${b.flagged_reason}</span>` : ''}</td>
         <td style="color:#8b949e;font-size:0.75rem">${(b.created_at||'').substring(0,19).replace('T',' ')}</td>
       </tr>`).join('');
   } catch(e) { alert(e.detail || 'Failed to load audit'); }

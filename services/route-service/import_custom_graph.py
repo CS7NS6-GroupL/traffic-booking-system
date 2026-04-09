@@ -8,39 +8,62 @@ Regions covered:
   - laos      (6 nodes, connected to cambodia via Voen Kham border)
   - cambodia  (7 nodes, connected to laos via Don Kralor border)
 
-The Laos/Cambodia border uses a SHARED node ID "border-laos-camb" that
-exists in BOTH regions' graphs. journey-management uses this as the
-gateway node for cross-region routing.
+The Laos/Cambodia border crossing is represented by two separate nodes,
+one in each region's graph:
+  - "border-laos-camb"  (region=laos,     in mongo-laos)    ← GATEWAY_LAOS_EXIT
+  - "border-camb-laos"  (region=cambodia, in mongo-cambodia) ← GATEWAY_CAMBODIA_ENTRY
+
+These IDs match the GATEWAY_LAOS_EXIT / GATEWAY_CAMBODIA_ENTRY env vars set in
+docker-compose for journey-management.
+
+Each region's data is written to its OWN MongoDB instance:
+  - andorra → mongo-andorra  (localhost:27022)
+  - laos    → mongo-laos     (localhost:27020)
+  - cambodia→ mongo-cambodia (localhost:27021)
 
 Run this script ONCE on any machine that has Docker running:
     python import_custom_graph.py
 
 It will:
-  1. Clear existing osm_nodes and osm_edges for these three regions.
+  1. Clear existing osm_nodes and osm_edges in each regional MongoDB.
   2. Insert the custom nodes and edges.
-  3. Create the 2dsphere index needed by route-service.
+  3. Create all indexes needed by route-service and validation-service.
 
 Teammate instructions:
   - Make sure Docker is running and containers are up (docker-compose up -d)
   - Install pymongo if needed:  pip install pymongo
   - Run from the project root:  python services/route-service/import_custom_graph.py
-  - Then restart the route services:
+  - Then restart the route and validation services:
       docker restart route-service-andorra route-service-laos route-service-cambodia
-      docker restart validation-service-laos validation-service-cambodia
+      docker restart validation-service-andorra validation-service-laos validation-service-cambodia
 """
 
-from pymongo import MongoClient, GEOSPHERE
+from pymongo import MongoClient, GEOSPHERE, ASCENDING
 
-MONGO_URI = "mongodb://localhost:27017"   # default local Docker port
+# ── Regional MongoDB connections ──────────────────────────────────────────────
+# Each region has its own MongoDB instance (separate containers in docker-compose).
+# Ports match the host port mappings in docker-compose.yml.
 
-client = MongoClient(MONGO_URI)
-db = client["traffic"]
+MONGO_LAOS     = "mongodb://localhost:27020"
+MONGO_CAMBODIA = "mongodb://localhost:27021"
+MONGO_ANDORRA  = "mongodb://localhost:27022"
 
-# ── 1. Clear existing data for these regions ──────────────────────────────────
+db_laos     = MongoClient(MONGO_LAOS,     serverSelectionTimeoutMS=5000)["traffic"]
+db_cambodia = MongoClient(MONGO_CAMBODIA, serverSelectionTimeoutMS=5000)["traffic"]
+db_andorra  = MongoClient(MONGO_ANDORRA,  serverSelectionTimeoutMS=5000)["traffic"]
 
-print("Clearing existing nodes and edges for andorra / laos / cambodia ...")
-db.osm_nodes.delete_many({"region": {"$in": ["andorra", "laos", "cambodia"]}})
-db.osm_edges.delete_many({"region": {"$in": ["andorra", "laos", "cambodia"]}})
+REGION_DBS = {
+    "laos":     db_laos,
+    "cambodia": db_cambodia,
+    "andorra":  db_andorra,
+}
+
+# ── 1. Clear existing data in each regional MongoDB ───────────────────────────
+
+for region, db in REGION_DBS.items():
+    print(f"Clearing existing nodes and edges in {region} MongoDB ...")
+    db.osm_nodes.delete_many({"region": region})
+    db.osm_edges.delete_many({"region": region})
 print("  Done.")
 
 
@@ -68,6 +91,13 @@ NODES = [
 
     {"_id": "and-sant-julia",       "region": "andorra",
      "loc": {"type": "Point", "coordinates": [1.4914, 42.4635]}},
+
+    # Demo capacity nodes — connected by a single-track mountain road (capacity=1)
+    {"_id": "and-la-massana",       "region": "andorra",
+     "loc": {"type": "Point", "coordinates": [1.5144, 42.5452]}},   # parish capital NW
+
+    {"_id": "and-arinsal",          "region": "andorra",
+     "loc": {"type": "Point", "coordinates": [1.4847, 42.5733]}},   # mountain village
 
     # ── Laos ───────────────────────────────────────────────────────────────────
     {"_id": "laos-vientiane",       "region": "laos",
@@ -129,62 +159,75 @@ def bidir(frm, to, region, km, rtype="primary"):
 EDGES = []
 
 # ── Andorra roads ──────────────────────────────────────────────────────────────
-for pair, km in [
-    (("and-andorra-la-vella", "and-escaldes"),    2.0),
-    (("and-andorra-la-vella", "and-sant-julia"),  7.5),
-    (("and-andorra-la-vella", "and-ordino"),     10.0),
-    (("and-escaldes",         "and-encamp"),      5.5),
-    (("and-encamp",           "and-canillo"),     6.0),
-    (("and-ordino",           "and-canillo"),    12.0),
+# Andorra is a tiny mountain country — no motorways, mostly secondary/tertiary.
+for pair, km, rtype in [
+    (("and-andorra-la-vella", "and-escaldes"),    2.0, "secondary"),   # urban connector, cap=75
+    (("and-andorra-la-vella", "and-sant-julia"),  7.5, "primary"),     # main road south, cap=100
+    (("and-andorra-la-vella", "and-ordino"),     10.0, "secondary"),   # road north, cap=75
+    (("and-escaldes",         "and-encamp"),      5.5, "secondary"),   # valley road, cap=75
+    (("and-encamp",           "and-canillo"),     6.0, "tertiary"),    # mountain road, cap=50
+    (("and-ordino",           "and-canillo"),    12.0, "tertiary"),    # mountain pass, cap=50
 ]:
-    EDGES.extend(bidir(*pair, "andorra", km))
+    EDGES.extend(bidir(*pair, "andorra", km, rtype))
+
+# Demo road — capacity 1 (single-track mountain trail, one vehicle at a time)
+EDGES.extend(bidir("and-la-massana", "and-arinsal", "andorra", 8.0, "track"))
 
 # ── Laos roads ────────────────────────────────────────────────────────────────
-for pair, km in [
-    (("laos-vientiane",     "laos-thakhek"),       220),
-    (("laos-thakhek",       "laos-savannakhet"),   125),
-    (("laos-savannakhet",   "laos-pakse"),         230),
-    (("laos-pakse",         "border-laos-camb"),   100),
-    (("laos-vientiane",     "laos-luang-prabang"), 380),
+# Route 13 is Laos's main national artery (trunk). Border road is primary.
+for pair, km, rtype in [
+    (("laos-vientiane",     "laos-thakhek"),       220, "trunk"),     # Route 13 south, cap=150
+    (("laos-thakhek",       "laos-savannakhet"),   125, "trunk"),     # Route 13 south, cap=150
+    (("laos-savannakhet",   "laos-pakse"),         230, "trunk"),     # Route 13 south, cap=150
+    (("laos-pakse",         "border-laos-camb"),   100, "primary"),   # border approach, cap=100
+    (("laos-vientiane",     "laos-luang-prabang"), 380, "primary"),   # Route 13 north, cap=100
 ]:
-    EDGES.extend(bidir(*pair, "laos", km))
+    EDGES.extend(bidir(*pair, "laos", km, rtype))
 
 # ── Cambodia roads ────────────────────────────────────────────────────────────
-for pair, km in [
-    (("border-camb-laos",  "khm-stung-treng"),   45),
-    (("khm-stung-treng",   "khm-kratie"),        140),
-    (("khm-kratie",        "khm-kompong-cham"),  145),
-    (("khm-kompong-cham",  "khm-phnom-penh"),    120),
-    (("khm-phnom-penh",    "khm-battambang"),    295),
-    (("khm-battambang",    "khm-siem-reap"),      95),
-    (("khm-siem-reap",     "khm-stung-treng"),   250),
+# NR5/NR6 are trunk-level. Northern rural routes are secondary.
+for pair, km, rtype in [
+    (("border-camb-laos",  "khm-stung-treng"),    45, "primary"),    # border entry, cap=100
+    (("khm-stung-treng",   "khm-kratie"),         140, "primary"),   # Route 7, cap=100
+    (("khm-kratie",        "khm-kompong-cham"),   145, "primary"),   # Route 7, cap=100
+    (("khm-kompong-cham",  "khm-phnom-penh"),     120, "trunk"),     # NR7 to capital, cap=150
+    (("khm-phnom-penh",    "khm-battambang"),     295, "trunk"),     # NR5 main highway, cap=150
+    (("khm-battambang",    "khm-siem-reap"),       95, "primary"),   # NR6, cap=100
+    (("khm-siem-reap",     "khm-stung-treng"),    250, "secondary"), # rural north, cap=75
 ]:
-    EDGES.extend(bidir(*pair, "cambodia", km))
+    EDGES.extend(bidir(*pair, "cambodia", km, rtype))
 
 
-# ── 4. Insert nodes and edges ─────────────────────────────────────────────────
+# ── 4. Insert nodes and edges into each regional MongoDB ──────────────────────
 
-print(f"Inserting {len(NODES)} nodes ...")
-db.osm_nodes.insert_many(NODES)
+for region, db in REGION_DBS.items():
+    region_nodes = [n for n in NODES if n["region"] == region]
+    region_edges = [e for e in EDGES if e["region"] == region]
+    print(f"Inserting {len(region_nodes)} nodes, {len(region_edges)} edges → {region} MongoDB ...")
+    if region_nodes:
+        db.osm_nodes.insert_many(region_nodes)
+    if region_edges:
+        db.osm_edges.insert_many(region_edges)
 
-print(f"Inserting {len(EDGES)} edges ...")
-db.osm_edges.insert_many(EDGES)
+# ── 5. Ensure indexes in each regional MongoDB ────────────────────────────────
+# route-service needs: 2dsphere on loc, compound (from, region) on edges
+# validation-service needs: (region) on edges for Redis seeding
 
-# ── 5. Ensure indexes (needed by route-service) ───────────────────────────────
 print("Ensuring indexes ...")
-db.osm_nodes.create_index([("loc", GEOSPHERE)])
-db.osm_nodes.create_index([("region", 1)])
-db.osm_edges.create_index([("region", 1)])
+for region, db in REGION_DBS.items():
+    db.osm_nodes.create_index([("loc", GEOSPHERE)])
+    db.osm_nodes.create_index([("region", ASCENDING)])
+    db.osm_edges.create_index([("region", ASCENDING)])
+    db.osm_edges.create_index([("from", ASCENDING)])
+    db.osm_edges.create_index([("from", ASCENDING), ("region", ASCENDING)])
 
 print()
 print("Custom graph import complete.")
-print(f"  andorra : {db.osm_nodes.count_documents({'region':'andorra'})} nodes, "
-      f"{db.osm_edges.count_documents({'region':'andorra'})} edges")
-print(f"  laos    : {db.osm_nodes.count_documents({'region':'laos'})} nodes, "
-      f"{db.osm_edges.count_documents({'region':'laos'})} edges")
-print(f"  cambodia: {db.osm_nodes.count_documents({'region':'cambodia'})} nodes, "
-      f"{db.osm_edges.count_documents({'region':'cambodia'})} edges")
+for region, db in REGION_DBS.items():
+    n = db.osm_nodes.count_documents({"region": region})
+    e = db.osm_edges.count_documents({"region": region})
+    print(f"  {region:<10}: {n} nodes, {e} edges")
 print()
 print("Next steps:")
 print("  docker restart route-service-andorra route-service-laos route-service-cambodia")
-print("  docker restart validation-service-laos validation-service-cambodia")
+print("  docker restart validation-service-andorra validation-service-laos validation-service-cambodia")
