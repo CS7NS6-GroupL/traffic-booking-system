@@ -508,13 +508,21 @@ def _advance_saga(saga_id: str, region: str, outcome: str, reason: str):
                 "status":           "approved",
                 "created_at":       datetime.utcnow().isoformat(),
             }
-            # Write booking to origin region's MongoDB (first region in the saga)
-            origin_region = regions_involved[0]
-            try:
-                _regional_ds_post(origin_region, "/bookings", booking_doc)
-            except Exception as exc:
-                print(f"[journey-management] regional booking write failed for {origin_region}: {exc}")
-                ds.insert_booking(booking_doc)  # fallback to global
+            # Write booking to every involved region's MongoDB so each regional
+            # data-service (and authority) has a record of the segments that
+            # cross through it.
+            segments_by_region = saga.get("segments_by_region", {})
+            for region in regions_involved:
+                regional_doc = {
+                    **booking_doc,
+                    "region": region,
+                    "segments": segments_by_region.get(region, []),
+                }
+                try:
+                    _regional_ds_post(region, "/bookings", regional_doc)
+                except Exception as exc:
+                    print(f"[journey-management] regional booking write failed for {region}: {exc}")
+                    ds.insert_booking(regional_doc)  # fallback to global
             ds.update_saga_status(saga_id, "COMMITTED")
             producer.send("booking-outcomes", {
                 "booking_id":        saga["booking_id"],
@@ -598,7 +606,10 @@ def cancel_journey(booking_id: str, authorization: str = Header(...)):
             raise HTTPException(status_code=403, detail="Not your booking")
         if booking.get("status") == "cancelled":
             raise HTTPException(status_code=409, detail="Already cancelled")
-        _cancel_booking_in_region(booking_id, datetime.utcnow().isoformat(), booking_region)
+        cancelled_at = datetime.utcnow().isoformat()
+        regions_to_cancel = booking.get("regions_involved") or [booking_region]
+        for r in regions_to_cancel:
+            _cancel_booking_in_region(booking_id, cancelled_at, r)
     except HTTPException:
         raise
     except Exception as exc:
