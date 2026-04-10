@@ -23,13 +23,22 @@ import os
 import json
 import uuid
 import threading
+import time
 import sys
+import logging
+import asyncio
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import httpx
+import redis as redis_lib
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+log = logging.getLogger("journey-management")
 
 sys.path.insert(0, "/app/shared")
 
@@ -80,6 +89,8 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "journey-management")
 REGION = os.getenv("REGION", "local")
 JWT_SECRET = os.getenv("JWT_SECRET", "changeme")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+DATA_SERVICE_URL = os.getenv("DATA_SERVICE_URL",
+    os.getenv("DATA_SERVICE_LAOS", "http://data-service-laos:8009"))
 
 # Per-region route-service URLs.
 # In production each points to a separate regional cluster.
@@ -140,12 +151,58 @@ def _verify(authorization: str) -> dict:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
+_producer_instance = None
+_producer_lock = threading.Lock()
+
 def _kafka_producer():
-    from kafka import KafkaProducer
-    return KafkaProducer(
-        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-    )
+    global _producer_instance
+    with _producer_lock:
+        if _producer_instance is None:
+            from kafka import KafkaProducer
+            _producer_instance = KafkaProducer(
+                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                value_serializer=lambda v: json.dumps(v).encode(),
+                retries=3,
+                acks="all",
+            )
+            log.info("kafka.producer initialized")
+    return _producer_instance
+
+
+# ── Redis leader election ─────────────────────────────────────────────────────
+
+REDIS_LEADER_URL = os.getenv("REDIS_LEADER_URL", "redis://redis-laos:6379")
+_leader_redis = redis_lib.from_url(REDIS_LEADER_URL, decode_responses=True)
+LEADER_KEY = "saga-coordinator-leader"
+LEADER_TTL = 30
+NODE_ID = os.getenv("HOSTNAME", uuid.uuid4().hex[:8])
+
+def _is_leader() -> bool:
+    result = _leader_redis.set(LEADER_KEY, NODE_ID, nx=True, ex=LEADER_TTL)
+    if result:
+        return True
+    current = _leader_redis.get(LEADER_KEY)
+    if current == NODE_ID:
+        _leader_redis.expire(LEADER_KEY, LEADER_TTL)
+        return True
+    return False
+
+def _leader_renewal_loop():
+    while True:
+        time.sleep(10)
+        try:
+            if _leader_redis.get(LEADER_KEY) == NODE_ID:
+                _leader_redis.expire(LEADER_KEY, LEADER_TTL)
+        except Exception as exc:
+            log.warning("leader.renewal error: %s", exc)
+
+def _saga_coordinator_loop():
+    while not _is_leader():
+        log.info("saga-coordinator: not leader, waiting 5s...")
+        time.sleep(5)
+    log.info("saga-coordinator: acquired leader lock node_id=%s", NODE_ID)
+    threading.Thread(target=_leader_renewal_loop, daemon=True).start()
+    _saga_outcome_consumer()  # existing consumer function
 
 
 # ── Regional data-service helpers (scatter-gather) ───────────────────────────
@@ -249,14 +306,20 @@ def _region_for_place(place: str) -> str:
     return region
 
 
-async def _call_regional_route(region: str, origin: str, destination: str) -> dict:
-    """Call a regional route-service for one leg."""
+@retry(retry=retry_if_exception_type(httpx.TransportError),
+       stop=stop_after_attempt(3), wait=wait_exponential(min=0.5, max=4), reraise=True)
+def _get_route_sync(client, url, **kw):
+    return client.get(url, **kw)
+
+
+def _call_regional_route(region: str, origin: str, destination: str) -> dict:
+    """Call a regional route-service for one leg (sync; run via asyncio.to_thread)."""
     base_url = REGION_ROUTE_URLS.get(region)
     if not base_url:
         raise HTTPException(status_code=422, detail=f"No route-service configured for region '{region}'")
     # A* on a large graph can take several seconds — allow up to 60s
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.get(f"{base_url}/routes", params={"origin": origin, "destination": destination})
+    with httpx.Client(timeout=60.0) as client:
+        resp = _get_route_sync(client, f"{base_url}/routes", params={"origin": origin, "destination": destination})
         if resp.status_code == 404:
             raise HTTPException(
                 status_code=422,
@@ -275,8 +338,29 @@ async def _call_regional_route(region: str, origin: str, destination: str) -> di
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
-def health():
-    return {"status": "ok", "service": SERVICE_NAME, "region": REGION}
+async def health():
+    checks = {}
+    try:
+        from kafka.admin import KafkaAdminClient
+        a = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, request_timeout_ms=3000)
+        a.list_topics()
+        a.close()
+        checks["kafka"] = "ok"
+    except Exception as e:
+        checks["kafka"] = f"error: {e}"
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as c:
+            r = await c.get(f"{DATA_SERVICE_URL}/health")
+            checks["data_service"] = "ok" if r.status_code == 200 else f"http {r.status_code}"
+    except Exception as e:
+        checks["data_service"] = f"error: {e}"
+    try:
+        checks["is_leader"] = _leader_redis.get(LEADER_KEY) == NODE_ID
+    except Exception:
+        checks["is_leader"] = False
+    ok = all(v == "ok" for k, v in checks.items() if k not in ("is_leader",))
+    return {"status": "ok" if ok else "degraded", "service": SERVICE_NAME,
+            "is_leader": checks.get("is_leader"), "checks": checks}
 
 
 # ── Route planning (Journey Orchestrator) ─────────────────────────────────────
@@ -325,7 +409,7 @@ async def plan_journey(req: PlanRequest):
         else:
             leg_destination = req.destination
 
-        leg_data = await _call_regional_route(region, leg_origin, leg_destination)
+        leg_data = await asyncio.to_thread(_call_regional_route, region, leg_origin, leg_destination)
         leg_segments = leg_data.get("segments", [])
 
         legs.append({
@@ -521,7 +605,7 @@ def _advance_saga(saga_id: str, region: str, outcome: str, reason: str):
                 try:
                     _regional_ds_post(region, "/bookings", regional_doc)
                 except Exception as exc:
-                    print(f"[journey-management] regional booking write failed for {region}: {exc}")
+                    log.warning("saga.regional_write failed region=%s saga_id=%s: %s", region, saga_id, exc)
                     ds.insert_booking(regional_doc)  # fallback to global
             ds.update_saga_status(saga_id, "COMMITTED")
             producer.send("booking-outcomes", {
@@ -535,7 +619,12 @@ def _advance_saga(saga_id: str, region: str, outcome: str, reason: str):
         producer.flush()
 
     except Exception as exc:
-        print(f"[journey-management] saga advance error for {saga_id}: {exc}")
+        log.error("saga.advance unhandled saga_id=%s: %s", saga_id, exc)
+        try:
+            ds.update_saga_status(saga_id, "FAILED")
+        except Exception:
+            pass
+        return
 
 
 def _saga_outcome_consumer():
@@ -556,13 +645,14 @@ def _saga_outcome_consumer():
             region = payload.get("region", payload.get("target_region", "unknown"))
             _advance_saga(saga_id, region, payload.get("outcome", "REJECTED"), payload.get("reason", ""))
     except Exception as exc:
-        print(f"[journey-management] Kafka consumer error: {exc}")
+        log.error("kafka.consumer error: %s", exc)
 
 
 @app.on_event("startup")
 def start_saga_consumer():
-    t = threading.Thread(target=_saga_outcome_consumer, daemon=True)
+    t = threading.Thread(target=_saga_coordinator_loop, daemon=True)
     t.start()
+    log.info("journey-management started node_id=%s", NODE_ID)
 
 
 # ── Booking lifecycle endpoints ───────────────────────────────────────────────

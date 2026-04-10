@@ -22,17 +22,23 @@ via data-service HTTP.
 """
 
 import json
+import logging
 import os
 import sys
 import threading
 import time
 from datetime import datetime, UTC
 
+import httpx
 import redis as redis_lib
 
 sys.path.insert(0, "/app/data")
 
 from fastapi import FastAPI
+
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+log = logging.getLogger("validation-service")
 
 app = FastAPI(title="Validation Service")
 
@@ -41,6 +47,7 @@ REGION                  = os.getenv("REGION", "local")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 REDIS_URL               = os.getenv("REDIS_URL", "redis://localhost:6379")
 MONGO_URI               = os.getenv("MONGO_URI", "mongodb://mongo:27017")
+DATA_SERVICE_URL        = os.getenv("DATA_SERVICE_URL", "http://data-gateway:8004")
 LOCK_TTL                = 10  # seconds
 
 # Capacity per road type — default 100 for anything not listed
@@ -59,6 +66,25 @@ ROAD_TYPE_CAPACITY = {
 }
 
 _redis = redis_lib.from_url(REDIS_URL, decode_responses=True)
+
+LUA_SAFE_DECR = """
+local cur = tonumber(redis.call('GET', KEYS[1]) or '0')
+if cur > 0 then
+    return redis.call('DECR', KEYS[1])
+else
+    return 0
+end
+"""
+_safe_decr = _redis.register_script(LUA_SAFE_DECR)
+
+
+def _safe_release(f: str, t: str):
+    _safe_decr(keys=[_cur_key(f, t)])
+
+
+# Thread references for health check
+_booking_thread = None
+_release_thread = None
 
 
 def now_utc_iso() -> str:
@@ -122,7 +148,7 @@ def validate_and_reserve(segments: list[dict], vehicle_id: str) -> dict:
         for seg in sorted_segs:
             _redis.incr(_cur_key(seg["from"], seg["to"]))
 
-        print(f"[{REGION}] Redis locks released, counters incremented for {len(sorted_segs)} segments")
+        log.info("[%s] Redis locks released, counters incremented for %d segments", REGION, len(sorted_segs))
         return {"outcome": "APPROVED", "reason": "Booking approved"}
 
     finally:
@@ -136,9 +162,7 @@ def validate_and_reserve(segments: list[dict], vehicle_id: str) -> dict:
 def release_segments(segments: list[dict]):
     """Decrement counters for cancelled or rolled-back bookings."""
     for seg in segments:
-        key = _cur_key(seg["from"], seg["to"])
-        if int(_redis.get(key) or 0) > 0:
-            _redis.decr(key)
+        _safe_release(seg["from"], seg["to"])
 
 
 # =============================================================================
@@ -160,11 +184,22 @@ def _message_segments(message: dict) -> list[dict]:
 
 @app.get("/health")
 def health():
+    checks = {}
     try:
-        redis_ok = bool(_redis.ping())
-    except Exception:
-        redis_ok = False
-    return {"status": "ok", "service": SERVICE_NAME, "region": REGION, "redis": redis_ok}
+        _redis.ping()
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"error: {e}"
+    try:
+        r = httpx.get(f"{DATA_SERVICE_URL}/health", timeout=3.0)
+        checks["data_service"] = "ok" if r.status_code == 200 else f"http {r.status_code}"
+    except Exception as e:
+        checks["data_service"] = f"error: {e}"
+    checks["booking_consumer_alive"] = _booking_thread is not None and _booking_thread.is_alive()
+    checks["release_consumer_alive"] = _release_thread is not None and _release_thread.is_alive()
+    ok = checks["redis"] == "ok" and checks["data_service"] == "ok"
+    return {"status": "ok" if ok else "degraded", "service": SERVICE_NAME,
+            "region": REGION, "checks": checks}
 
 
 @app.get("/validation/status")
@@ -197,11 +232,18 @@ def _validate_and_publish(message: dict, producer):
     import data_service as ds
 
     booking_id  = message.get("booking_id", "unknown")
+    driver_id   = message.get("driver_id")
     saga_id     = message.get("saga_id")
     vehicle_id  = message.get("vehicle_id")
     segments    = _message_segments(message)
     origin      = segments[0]["from"] if segments else message.get("origin")
     destination = segments[-1]["to"]  if segments else message.get("destination")
+
+    existing = ds.get_booking_by_id(booking_id)
+    if existing and existing.get("status") in ("approved", "rejected", "pending"):
+        log.warning("[%s] dedup.skip booking_id=%s already processed status=%s",
+                    REGION, booking_id, existing.get("status"))
+        return
 
     try:
         if not segments:
@@ -212,23 +254,35 @@ def _validate_and_publish(message: dict, producer):
             outcome = result["outcome"]
             reason  = result["reason"]
             if not saga_id:
-                ds.insert_booking({
-                    **{k: v for k, v in message.items() if k != "_id"},
-                    "status":      outcome.lower(),
-                    "approved_at": now_utc_iso() if outcome == "APPROVED" else None,
-                    "rejected_at": now_utc_iso() if outcome == "REJECTED" else None,
-                    "reject_reason": reason if outcome == "REJECTED" else None,
-                    "region":      REGION,   # override booking-service's region with actual processing region
-                })
+                try:
+                    ds.insert_booking({
+                        **{k: v for k, v in message.items() if k != "_id"},
+                        "status":      outcome.lower(),
+                        "approved_at": now_utc_iso() if outcome == "APPROVED" else None,
+                        "rejected_at": now_utc_iso() if outcome == "REJECTED" else None,
+                        "reject_reason": reason if outcome == "REJECTED" else None,
+                        "region":      REGION,   # override booking-service's region with actual processing region
+                    })
+                except Exception as exc:
+                    log.error("[%s] db.insert_booking failed booking_id=%s: %s", REGION, booking_id, exc)
+                    producer.send("booking-outcomes", {
+                        "booking_id": booking_id,
+                        "driver_id":  driver_id,
+                        "outcome":    "REJECTED",
+                        "reason":     f"Database write failed: {exc}",
+                        "region":     REGION,
+                    })
+                    producer.flush()
+                    return
     except Exception as exc:
         outcome = "REJECTED"
         reason  = f"Internal validation error: {exc}"
 
-    print(f"[{REGION}] booking {booking_id} → {outcome} ({reason})")
+    log.info("[%s] booking %s → %s (%s)", REGION, booking_id, outcome, reason)
 
     result = {
         "booking_id":    booking_id,
-        "driver_id":     message.get("driver_id"),
+        "driver_id":     driver_id,
         "vehicle_id":    vehicle_id,
         "origin":        origin,
         "destination":   destination,
@@ -253,46 +307,51 @@ def _release_capacity(message: dict):
 
 
 def _booking_consumer_loop():
-    from kafka import KafkaConsumer, KafkaProducer
+    while True:
+        try:
+            from kafka import KafkaConsumer, KafkaProducer
 
-    try:
-        consumer = KafkaConsumer(
-            "booking-requests",
-            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-            value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-            group_id=f"validation-group-{REGION}",
-            auto_offset_reset="earliest",
-        )
-        producer = KafkaProducer(
-            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-        )
-        for msg in consumer:
-            payload = msg.value
-            target  = payload.get("target_region")
-            if target and target != REGION:
-                continue
-            print(f"[{REGION}] received from Kafka: booking {payload.get('booking_id')} saga={payload.get('saga_id')}")
-            _validate_and_publish(payload, producer)
-    except Exception as exc:
-        print(f"[validation-service] booking consumer error: {exc}")
+            consumer = KafkaConsumer(
+                "booking-requests",
+                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+                group_id=f"validation-group-{REGION}",
+                auto_offset_reset="earliest",
+            )
+            producer = KafkaProducer(
+                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+            )
+            for msg in consumer:
+                payload = msg.value
+                target  = payload.get("target_region")
+                if target and target != REGION:
+                    continue
+                log.info("[%s] received from Kafka: booking %s saga=%s",
+                         REGION, payload.get("booking_id"), payload.get("saga_id"))
+                _validate_and_publish(payload, producer)
+        except Exception as exc:
+            log.error("[%s] booking-consumer crashed: %s — restarting in 5s", REGION, exc)
+            time.sleep(5)
 
 
 def _release_consumer_loop():
-    from kafka import KafkaConsumer
+    while True:
+        try:
+            from kafka import KafkaConsumer
 
-    try:
-        consumer = KafkaConsumer(
-            "capacity-releases",
-            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-            value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-            group_id=f"capacity-release-group-{REGION}",
-            auto_offset_reset="earliest",
-        )
-        for msg in consumer:
-            _release_capacity(msg.value)
-    except Exception as exc:
-        print(f"[validation-service] release consumer error: {exc}")
+            consumer = KafkaConsumer(
+                "capacity-releases",
+                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+                group_id=f"capacity-release-group-{REGION}",
+                auto_offset_reset="earliest",
+            )
+            for msg in consumer:
+                _release_capacity(msg.value)
+        except Exception as exc:
+            log.error("[%s] release-consumer crashed: %s — restarting in 5s", REGION, exc)
+            time.sleep(5)
 
 
 # =============================================================================
@@ -337,9 +396,9 @@ def _seed_redis_capacity():
 
         pipe.execute()  # flush remainder
         client.close()
-        print(f"[validation-service] Seeded {seeded} Redis segment keys for region '{REGION}'")
+        log.info("[validation-service] Seeded %d Redis segment keys for region '%s'", seeded, REGION)
     except Exception as exc:
-        print(f"[validation-service] Redis seed warning: {exc}")
+        log.warning("[validation-service] Redis seed warning: %s", exc)
 
 
 def _redis_watchdog():
@@ -361,15 +420,25 @@ def _redis_watchdog():
         time.sleep(POLL_SECONDS)
         try:
             if not _redis.exists(PROBE_KEY):
-                print(f"[validation-service] Redis probe key missing for '{REGION}' — re-seeding capacity")
+                log.warning("[validation-service] Redis probe key missing for '%s' — re-seeding capacity", REGION)
                 _seed_redis_capacity()
                 _redis.set(PROBE_KEY, "1")
         except Exception as exc:
-            print(f"[validation-service] Redis watchdog error: {exc}")
+            log.error("[validation-service] Redis watchdog error: %s", exc)
 
 
 @app.on_event("startup")
 def start_consumers():
-    for fn in (_seed_redis_capacity, _booking_consumer_loop, _release_consumer_loop, _redis_watchdog):
-        t = threading.Thread(target=fn, daemon=True)
-        t.start()
+    global _booking_thread, _release_thread
+
+    seed_thread = threading.Thread(target=_seed_redis_capacity, daemon=True)
+    seed_thread.start()
+
+    _booking_thread = threading.Thread(target=_booking_consumer_loop, daemon=True)
+    _booking_thread.start()
+
+    _release_thread = threading.Thread(target=_release_consumer_loop, daemon=True)
+    _release_thread.start()
+
+    watchdog_thread = threading.Thread(target=_redis_watchdog, daemon=True)
+    watchdog_thread.start()
