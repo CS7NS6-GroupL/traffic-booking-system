@@ -1,14 +1,29 @@
 from dnslib.server import DNSServer, BaseResolver
-from dnslib import RR, QTYPE, A, DNSRecord
+from dnslib import RR, QTYPE, A
 import socket
 
+# Resolve the NGINX container's IP at query time via Docker's internal DNS.
+# This avoids needing a static IP or custom subnet in docker-compose.yml.
+NGINX_HOSTNAME = "nginx"
+
+# In a real multi-machine deployment each region would have its own NGINX
+# instance at a distinct IP and REGION_GATEWAYS would map to those IPs.
+# In the single-host demo all three regions resolve to the same NGINX container.
 REGION_GATEWAYS = {
-    "eu": "172.30.0.10",
-    "us": "172.30.0.20",
-    "asia": "172.30.0.30",
+    "laos":     NGINX_HOSTNAME,
+    "cambodia": NGINX_HOSTNAME,
+    "andorra":  NGINX_HOSTNAME,
 }
 
-DEFAULT_REGION = "eu"
+DEFAULT_REGION = "laos"
+
+
+def resolve_hostname(hostname):
+    try:
+        return socket.gethostbyname(hostname)
+    except socket.gaierror as e:
+        print(f"[DNS ERROR] Could not resolve {hostname}: {e}")
+        return None
 
 
 class GeoDNS(BaseResolver):
@@ -17,10 +32,9 @@ class GeoDNS(BaseResolver):
 
         qname = str(request.q.qname).rstrip(".")
         qtype = QTYPE[request.q.qtype]
-
         client_ip = handler.client_address[0]
 
-        print(f"[DNS QUERY] client={client_ip} name={qname} type={qtype}")
+        print(f"[DNS QUERY] client={client_ip}  name={qname}  type={qtype}")
 
         if qtype != "A":
             print(f"[DNS INFO] Unsupported query type: {qtype}")
@@ -32,12 +46,14 @@ class GeoDNS(BaseResolver):
             print(f"[DNS INFO] No matching record for {qname}")
             return reply
 
-        gateway_ip = REGION_GATEWAYS[region]
+        gateway_hostname = REGION_GATEWAYS[region]
+        gateway_ip = resolve_hostname(gateway_hostname)
 
-        print(
-            f"[DNS ANSWER] client={client_ip} name={qname} "
-            f"region={region} gateway={gateway_ip}"
-        )
+        if gateway_ip is None:
+            print(f"[DNS ERROR] Could not resolve gateway for region {region}")
+            return reply
+
+        print(f"[DNS ANSWER] {qname} → {region} → {gateway_ip}  (client={client_ip})")
 
         reply.add_answer(
             RR(
@@ -48,46 +64,46 @@ class GeoDNS(BaseResolver):
                 rdata=A(gateway_ip),
             )
         )
-
         return reply
 
-    def select_region(self, request, client_ip):
-        if request == "eu.api.demo.local":
-            return "eu"
-        if request == "us.api.demo.local":
-            return "us"
-        if request == "asia.api.demo.local":
-            return "asia"
+    def select_region(self, qname, client_ip):
+        if qname == "laos.api.demo.local":
+            return "laos"
+        if qname == "cambodia.api.demo.local":
+            return "cambodia"
+        if qname == "andorra.api.demo.local":
+            return "andorra"
 
-        if request == "api.demo.local":
+        if qname == "api.demo.local":
             return self.map_client_ip_to_region(client_ip)
 
         return None
 
-    def map_client_ip_to_region(self, client_ip) :
+    def map_client_ip_to_region(self, client_ip):
+        # Production subnet assignments (one /16 per region).
+        # In the single-host demo all containers share one subnet so this
+        # always falls through to DEFAULT_REGION.
         if client_ip.startswith("10.1."):
-            return "eu"
+            return "laos"
         if client_ip.startswith("10.2."):
-            return "us"
+            return "cambodia"
         if client_ip.startswith("10.3."):
-            return "asia"
-
+            return "andorra"
         return DEFAULT_REGION
 
 
 if __name__ == "__main__":
     resolver = GeoDNS()
 
-    udp_server = DNSServer(
-        resolver,
-        port=53,
-        address="0.0.0.0",
-        tcp=False,
-    )
+    udp_server = DNSServer(resolver, port=53, address="0.0.0.0", tcp=False)
 
-    print("GeoDNS server listening on UDP port 53")
-    print("Region gateways:")
-    for region, ip in REGION_GATEWAYS.items():
-        print(f"  - {region}: {ip}")
+    print("GeoDNS server listening on UDP :53")
+    print("")
+    print("Resolved domains:")
+    print("  api.demo.local           ->  nearest region  (IP-subnet routing)")
+    print("  laos.api.demo.local      ->  laos gateway")
+    print("  cambodia.api.demo.local  ->  cambodia gateway")
+    print("  andorra.api.demo.local   ->  andorra gateway")
+    print(f"  NGINX hostname: {NGINX_HOSTNAME}")
 
     udp_server.start()

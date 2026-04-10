@@ -1041,3 +1041,22 @@ services:
       - data-gateway
     networks:
       - traffic-net
+
+  # ── GeoDNS ──────────────────────────────────────────────────────────────────
+  # Custom DNS server that resolves *.api.demo.local to the nearest regional
+  # NGINX gateway. In this single-host demo all three regions resolve to the
+  # same NGINX instance (172.30.0.10). In a multi-machine deployment each
+  # region would have its own NGINX at a distinct IP.
+  #
+  # Exposed on host port 1053/udp to avoid conflicting with the system resolver.
+  # Test: dig @localhost -p 1053 api.demo.local
+  #       dig @localhost -p 1053 laos.api.demo.local
+  geodns:
+    build:
+      context: services/geoDNS
+    container_name: geodns
+    restart: unless-stopped
+    ports:
+      - "1053:53/udp"
+    networks:
+      - traffic-net

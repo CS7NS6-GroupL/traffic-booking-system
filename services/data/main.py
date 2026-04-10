@@ -20,7 +20,7 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "data-service")
 def health():
     checks = {}
     try:
-        ds.mongo_client.admin.command("ping", serverSelectionTimeoutMS=3000)
+        ds.mongo_client.admin.command("ping")
         checks["mongo"] = "ok"
     except Exception as e:
         checks["mongo"] = f"error: {e}"

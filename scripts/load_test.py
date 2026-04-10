@@ -12,21 +12,55 @@ Steps:
   2. Runs test suites and prints a summary table.
 
 Scale modes:
-  normal  — small runs, fast, good for development (default)
-  high    — thousands of requests, connection-pooled, samples outcomes
+  normal  - small runs, fast, good for development (default)
+  high    - thousands of requests, connection-pooled, samples outcomes
 """
 
 import argparse
 import base64
 import concurrent.futures
+import datetime
 import json
 import statistics
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 import httpx
+
+
+# ---------------------------------------------------------------------------
+# Tee writer -- simultaneous terminal + file output, UTF-8, no encoding crash
+# ---------------------------------------------------------------------------
+
+class _Tee:
+    """Write to multiple streams; skip any that fail (e.g. cp1252 console)."""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            try:
+                s.write(data)
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                try:
+                    s.write(data.encode("ascii", errors="replace").decode("ascii"))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    def flush(self):
+        for s in self.streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+    def fileno(self):
+        return self.streams[0].fileno()
 
 # ---------------------------------------------------------------------------
 # Config
@@ -38,7 +72,9 @@ parser.add_argument("--token", default="", help="Bearer token for a DRIVER accou
 parser.add_argument("--workers", type=int, default=0,
                     help="Thread pool size (0 = auto based on scale)")
 parser.add_argument("--scale", choices=["normal", "high"], default="normal",
-                    help="normal=50–100 req, high=1000s of req")
+                    help="normal=50-100 req, high=1000s of req")
+parser.add_argument("--output", default="",
+                    help="Write output to this file (default: auto-named results_YYYYMMDD_HHMMSS.txt)")
 args = parser.parse_args()
 
 BASE    = args.base_url.rstrip("/")
@@ -78,29 +114,29 @@ def _jwt_sub(token: str) -> str:
 
 DRIVER_ID = _jwt_sub(args.token)
 
-# Use custom graph node IDs directly — bypasses Nominatim geocoding entirely.
+# Use custom graph node IDs directly -- bypasses Nominatim geocoding entirely.
 ORIGIN_CROSS = "laos-pakse"
 DEST_CROSS   = "khm-phnom-penh"
 ORIGIN_CAP   = "and-la-massana"
 DEST_CAP     = "and-arinsal"
 
-# Route pool for throughput tests — rotated round-robin so concurrent requests
+# Route pool for throughput tests -- rotated round-robin so concurrent requests
 # hit DIFFERENT road segments, preventing artificial capacity rejection.
 # Each pair is a valid custom-graph route within a single region.
 ROUTE_POOL = [
-    # Laos (trunk/primary, cap 100–150 per segment)
+    # Laos (trunk/primary, cap 100-150 per segment)
     ("laos-vientiane",       "laos-luang-prabang"),
     ("laos-vientiane",       "laos-thakhek"),
     ("laos-vientiane",       "laos-savannakhet"),
     ("laos-thakhek",         "laos-savannakhet"),
     ("laos-savannakhet",     "laos-pakse"),
-    # Cambodia (trunk/primary, cap 100–150 per segment)
+    # Cambodia (trunk/primary, cap 100-150 per segment)
     ("khm-phnom-penh",       "khm-battambang"),
     ("khm-phnom-penh",       "khm-siem-reap"),
     ("khm-phnom-penh",       "khm-kompong-cham"),
     ("khm-kompong-cham",     "khm-kratie"),
     ("khm-battambang",       "khm-siem-reap"),
-    # Andorra (secondary/tertiary, cap 50–75 per segment)
+    # Andorra (secondary/tertiary, cap 50-75 per segment)
     ("and-andorra-la-vella", "and-encamp"),
     ("and-andorra-la-vella", "and-ordino"),
     ("and-andorra-la-vella", "and-sant-julia"),
@@ -108,7 +144,7 @@ ROUTE_POOL = [
     ("and-escaldes",         "and-encamp"),
 ]
 
-# Shared connection-pooled client — reused across all requests in a test.
+# Shared connection-pooled client -- reused across all requests in a test.
 # Without this, each request opens+closes a TCP connection: catastrophic at scale.
 _CLIENT: Optional[httpx.Client] = None
 
@@ -207,7 +243,7 @@ def reset_capacity():
             print(f"  [reset] {region}: {n} counters zeroed")
         except Exception as exc:
             print(f"  [reset] {region}: FAILED ({exc})")
-    print(f"  [reset] done — {total} counters reset across all regions\n")
+    print(f"  [reset] done -- {total} counters reset across all regions\n")
 
 
 def print_stats(title: str, results: List[Result], wall_ms: float = 0.0):
@@ -257,7 +293,7 @@ def _poll_sample(results: List[Result], n: int, label: str):
 
 
 # ---------------------------------------------------------------------------
-# Test 1 — Single-region throughput burst
+# Test 1 -- Single-region throughput burst
 # ---------------------------------------------------------------------------
 
 def test_single_region_throughput(n=T1_N):
@@ -278,15 +314,15 @@ def test_single_region_throughput(n=T1_N):
 
 
 # ---------------------------------------------------------------------------
-# Test 2 — Capacity enforcement (contention)
+# Test 2 -- Capacity enforcement (contention)
 # ---------------------------------------------------------------------------
 
 def test_capacity_enforcement(n=T2_N):
     """
-    Send N simultaneous bookings on La Massana→Arinsal (capacity=1).
+    Send N simultaneous bookings on La Massana->Arinsal (capacity=1).
     Exactly 1 should be approved; the rest rejected.
     """
-    print(f"\n[TEST 2] Capacity enforcement — La Massana→Arinsal (cap=1), {n} simultaneous")
+    print(f"\n[TEST 2] Capacity enforcement -- La Massana->Arinsal (cap=1), {n} simultaneous")
     wall_start = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
         futures = [
@@ -312,21 +348,21 @@ def test_capacity_enforcement(n=T2_N):
     timeouts = sum(1 for o in outcomes.values() if o == "timeout")
     print(f"\n  RESULT: {approved} approved, {rejected} rejected, {timeouts} timed out  (n={n})")
     ok = approved == 1 and rejected == n - 1 - timeouts + approved - 1
-    print(f"  Capacity=1 enforced: {'PASS — only 1 approved' if approved == 1 else 'CHECK — ' + str(approved) + ' approved (expected 1)'}")
+    print(f"  Capacity=1 enforced: {'PASS -- only 1 approved' if approved == 1 else 'CHECK -- ' + str(approved) + ' approved (expected 1)'}")
     return results, approved, rejected
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — Health endpoint baseline
+# Test 3 -- Health endpoint baseline
 # ---------------------------------------------------------------------------
 
 def test_health_latency(n=100):
-    print(f"\n[TEST 3] Health endpoint baseline  ({n} sequential requests)")
+    print(f"\n[TEST 3] Health endpoint baseline  ({n} sequential requests to /api/health/booking)")
     results = []
     for _ in range(n):
         t0 = time.perf_counter()
         try:
-            r = _client().get(f"{BASE}/api/health", headers=AUTH_H)
+            r = _client().get(f"{BASE}/api/health/booking", headers=AUTH_H)
             ms = (time.perf_counter() - t0) * 1000
             results.append(Result(ms, r.status_code, r.status_code == 200))
         except Exception as exc:
@@ -337,7 +373,7 @@ def test_health_latency(n=100):
 
 
 # ---------------------------------------------------------------------------
-# Test 4 — Cross-region saga latency (sequential, with end-to-end timing)
+# Test 4 -- Cross-region saga latency (sequential, with end-to-end timing)
 # ---------------------------------------------------------------------------
 
 def test_cross_region_timing(n=T4_N):
@@ -354,10 +390,10 @@ def test_cross_region_timing(n=T4_N):
         outcome = poll_booking_outcome(r.booking_id, timeout_sec=POLL_TIMEOUT)
         e2e_ms = (time.perf_counter() - t0) * 1000
         e2e_latencies.append(e2e_ms)
-        print(f"{outcome.upper()} — submit {r.latency_ms:.0f}ms / e2e {e2e_ms:.0f}ms")
+        print(f"{outcome.upper()} -- submit {r.latency_ms:.0f}ms / e2e {e2e_ms:.0f}ms")
         time.sleep(0.5)
 
-    print(f"\n  Cross-region saga end-to-end (submit → Kafka outcome):")
+    print(f"\n  Cross-region saga end-to-end (submit -> Kafka outcome):")
     if e2e_latencies:
         print(f"    p50  = {percentile(e2e_latencies, 50):.0f} ms")
         print(f"    p95  = {percentile(e2e_latencies, 95):.0f} ms")
@@ -369,12 +405,12 @@ def test_cross_region_timing(n=T4_N):
 
 
 # ---------------------------------------------------------------------------
-# Test 5 — Sustained load ramp
+# Test 5 -- Sustained load ramp
 # ---------------------------------------------------------------------------
 
 def test_sustained_load(duration_sec=T5_DURATION, rps_target=T5_RPS):
     print(f"\n[TEST 5] Sustained load  ({rps_target} req/s for {duration_sec}s"
-          f" → ~{rps_target * duration_sec} requests)")
+          f" -> ~{rps_target * duration_sec} requests)")
     interval = 1.0 / rps_target
     results = []
     deadline = time.perf_counter() + duration_sec
@@ -394,7 +430,7 @@ def test_sustained_load(duration_sec=T5_DURATION, rps_target=T5_RPS):
             time.sleep(interval)
         results = [f.result() for f in concurrent.futures.as_completed(pending)]
 
-    print_stats(f"Sustained load ({rps_target} req/s × {duration_sec}s)", results,
+    print_stats(f"Sustained load ({rps_target} req/s x {duration_sec}s)", results,
                 wall_ms=duration_sec * 1000)
 
     if args.scale == "high":
@@ -404,7 +440,7 @@ def test_sustained_load(duration_sec=T5_DURATION, rps_target=T5_RPS):
 
 
 # ---------------------------------------------------------------------------
-# Test 6 — Mega burst (high scale only)
+# Test 6 -- Mega burst (high scale only)
 # ---------------------------------------------------------------------------
 
 def test_mega_burst(n=T6_N):
@@ -433,6 +469,14 @@ def test_mega_burst(n=T6_N):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # Set up output file (always written; also echoed to terminal)
+    _outfile_name = args.output or (
+        "results_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"
+    )
+    _outfile = open(_outfile_name, "w", encoding="utf-8", errors="replace")
+    sys.stdout = _Tee(sys.__stdout__, _outfile)
+    print(f"Output also saved to: {_outfile_name}\n")
+
     if not args.token:
         print("WARNING: No --token provided. Requests will fail with 401.")
         print("  Register: curl -X POST http://localhost/api/auth/register ...")
@@ -441,7 +485,7 @@ if __name__ == "__main__":
         print()
 
     print("=" * 64)
-    print("  Traffic Booking System — Load & Stress Test")
+    print("  Traffic Booking System -- Load & Stress Test")
     print(f"  Target: {BASE}   Workers: {WORKERS}   Scale: {args.scale.upper()}")
     print("=" * 64)
 
@@ -466,7 +510,7 @@ if __name__ == "__main__":
     # Final summary table
     # -----------------------------------------------------------------------
     print("\n" + "=" * 64)
-    print("  REPORT SUMMARY — copy these numbers into the report")
+    print("  REPORT SUMMARY -- copy these numbers into the report")
     print("=" * 64)
 
     def _lat(results, ok_only=True):
@@ -486,9 +530,9 @@ if __name__ == "__main__":
     if stress_lat:
         print(f"    p50={percentile(stress_lat,50):.0f}ms  p95={percentile(stress_lat,95):.0f}ms"
               f"  mean={statistics.mean(stress_lat):.0f}ms"
-              f"  throughput≈{T1_N/(max(stress_lat)/1000):.0f} req/s")
+              f"  throughput~{T1_N/(max(stress_lat)/1000):.0f} req/s")
 
-    print(f"\n  Sustained load ({T5_RPS} req/s × {T5_DURATION}s, n={len(sustained_lat)})")
+    print(f"\n  Sustained load ({T5_RPS} req/s x {T5_DURATION}s, n={len(sustained_lat)})")
     if sustained_lat:
         print(f"    p50={percentile(sustained_lat,50):.0f}ms  p95={percentile(sustained_lat,95):.0f}ms"
               f"  mean={statistics.mean(sustained_lat):.0f}ms")
@@ -506,14 +550,14 @@ if __name__ == "__main__":
     if mega_lat:
         print(f"\n  Mega burst ({T6_N} requests)")
         print(f"    p50={percentile(mega_lat,50):.0f}ms  p95={percentile(mega_lat,95):.0f}ms"
-              f"  throughput≈{T6_N/(max(mega_lat)/1000):.0f} req/s")
+              f"  throughput~{T6_N/(max(mega_lat)/1000):.0f} req/s")
 
     # -----------------------------------------------------------------------
     # Cleanup
     # -----------------------------------------------------------------------
     import subprocess
     print("\n" + "=" * 64)
-    print("  CLEANUP — deleting test bookings from all regional MongoDB")
+    print("  CLEANUP -- deleting test bookings from all regional MongoDB")
     print("=" * 64)
     for container, region in [
         ("mongo-laos",     "laos"),
@@ -533,3 +577,6 @@ if __name__ == "__main__":
             print(f"  {region:<10}: FAILED ({exc})")
     reset_capacity()
     print("  Done.")
+    _outfile.close()
+    sys.stdout = sys.__stdout__
+    print(f"\nResults saved to: {_outfile_name}")

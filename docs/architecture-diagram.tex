@@ -1,0 +1,187 @@
+% Architecture diagram — Globally Accessible Distributed Traffic Booking Service
+% Include in a LaTeX document with:
+%   \usepackage{tikz}
+%   \usetikzlibrary{positioning,fit,backgrounds,arrows.meta,calc}
+%
+% Usage:  \input{docs/architecture-diagram.tex}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}
+
+% ── COLOURS ──────────────────────────────────────────────────────────────────
+\colorlet{svcfill}  {green!25!black!72}
+\colorlet{dbfill}   {blue!55!black!72}
+\colorlet{rdsfill}  {red!55!black!72}
+\colorlet{glbfill}  {blue!45!cyan!55!black}
+\colorlet{kafkafill}{orange!65!red!78}
+\colorlet{nginxfill}{purple!55!black!80}
+\colorlet{clifill}  {black!72}
+
+% ── NODE STYLES ──────────────────────────────────────────────────────────────
+\tikzset{
+  svc/.style={draw, fill=svcfill,   text=white, rounded corners=3pt,
+              font=\small\bfseries, align=center,
+              minimum width=44mm, minimum height=9mm, inner sep=2pt},
+  db/.style= {draw, fill=dbfill,    text=white, rounded corners=3pt,
+              font=\small,          align=center,
+              minimum width=44mm, minimum height=9mm, inner sep=2pt},
+  rds/.style={draw, fill=rdsfill,   text=white, rounded corners=3pt,
+              font=\small,          align=center,
+              minimum width=44mm, minimum height=9mm, inner sep=2pt},
+  glb/.style={draw, fill=glbfill,   text=white, rounded corners=3pt,
+              font=\small\bfseries, align=center,
+              minimum width=44mm, minimum height=9mm, inner sep=2pt},
+  kfk/.style={draw, fill=kafkafill, text=white, rounded corners=5pt,
+              font=\normalsize\bfseries, align=center,
+              minimum width=148mm, minimum height=14mm},
+  gw/.style= {draw, fill=nginxfill, text=white, rounded corners=4pt,
+              font=\normalsize\bfseries, align=center,
+              minimum width=108mm, minimum height=12mm},
+  cli/.style={draw, fill=clifill,   text=white, rounded corners=4pt,
+              font=\normalsize\bfseries, align=center,
+              minimum width=46mm,  minimum height=12mm},
+  cbox/.style={draw=gray!60, line width=0.9pt, rounded corners=6pt,
+               fill=gray!8, inner sep=4mm},
+  gbox/.style={draw=blue!45!black!55, line width=0.9pt, rounded corners=6pt,
+               fill=blue!5, inner sep=5mm},
+  arr/.style= {-{Stealth[length=2.5mm,width=2mm]}, line width=0.9pt,
+               color=gray!65!black},
+  barr/.style={{Stealth[length=2.5mm,width=2mm]}-{Stealth[length=2.5mm,width=2mm]},
+               line width=0.9pt, color=gray!65!black}
+}
+
+% ── LAOS CLUSTER  (x = -5.5) ─────────────────────────────────────────────────
+\node[svc] (rsl) at (-5.5, 4.6)
+  {Route Service (Laos)\\[-2pt]{\scriptsize A* routing on OSM graph}};
+\node[svc] (vsl) at (-5.5, 3.3)
+  {Validation Service (Laos) ×2\\[-2pt]{\scriptsize Kafka consumer $\cdot$ Redis locks $\cdot$ dedup}};
+\node[svc] (dsl) at (-5.5, 2.0)
+  {Data Service (Laos) ×2\\[-2pt]{\scriptsize bookings $\cdot$ OSM edges}};
+\node[svc] (asl) at (-5.5, 0.7)
+  {Authority Service (Laos)\\[-2pt]{\scriptsize read-only $\cdot$ AUTHORITY JWT only}};
+\node[rds] (rl)  at (-5.5,-0.6)
+  {Redis (Laos)\\[-2pt]{\scriptsize locks $\cdot$ counters $\cdot$ leader key}};
+\node[db]  (ml)  at (-5.5,-1.9)
+  {MongoDB (Laos)\\[-2pt]{\scriptsize bookings $\cdot$ osm\_nodes $\cdot$ osm\_edges}};
+
+\begin{pgfonlayer}{background}
+  \node[cbox, fit=(rsl)(vsl)(dsl)(asl)(rl)(ml)] (laosbox) {};
+\end{pgfonlayer}
+\node[above=3pt of laosbox, font=\normalsize\bfseries, color=gray!65!black]
+  {\textsc{Laos Cluster}};
+
+% ── CAMBODIA CLUSTER  (x = 0) ────────────────────────────────────────────────
+\node[svc] (rsc) at (0, 4.6)
+  {Route Service (Cambodia)\\[-2pt]{\scriptsize A* routing on OSM graph}};
+\node[svc] (vsc) at (0, 3.3)
+  {Validation Service (Cambodia) ×2\\[-2pt]{\scriptsize Kafka consumer $\cdot$ Redis locks $\cdot$ dedup}};
+\node[svc] (dsc) at (0, 2.0)
+  {Data Service (Cambodia) ×2\\[-2pt]{\scriptsize bookings $\cdot$ OSM edges}};
+\node[svc] (asc) at (0, 0.7)
+  {Authority Service (Cambodia)\\[-2pt]{\scriptsize read-only $\cdot$ AUTHORITY JWT only}};
+\node[rds] (rc)  at (0,-0.6)
+  {Redis (Cambodia)\\[-2pt]{\scriptsize locks $\cdot$ counters}};
+\node[db]  (mc)  at (0,-1.9)
+  {MongoDB (Cambodia)\\[-2pt]{\scriptsize bookings $\cdot$ osm\_nodes $\cdot$ osm\_edges}};
+
+\begin{pgfonlayer}{background}
+  \node[cbox, fit=(rsc)(vsc)(dsc)(asc)(rc)(mc)] (cambodiabox) {};
+\end{pgfonlayer}
+\node[above=3pt of cambodiabox, font=\normalsize\bfseries, color=gray!65!black]
+  {\textsc{Cambodia Cluster}};
+
+% ── ANDORRA CLUSTER  (x = +5.5) ──────────────────────────────────────────────
+\node[svc] (rsa) at (5.5, 4.6)
+  {Route Service (Andorra)\\[-2pt]{\scriptsize A* routing on OSM graph}};
+\node[svc] (vsa) at (5.5, 3.3)
+  {Validation Service (Andorra) ×2\\[-2pt]{\scriptsize Kafka consumer $\cdot$ Redis locks $\cdot$ dedup}};
+\node[svc] (dsa) at (5.5, 2.0)
+  {Data Service (Andorra) ×2\\[-2pt]{\scriptsize bookings $\cdot$ OSM edges}};
+\node[svc] (asa) at (5.5, 0.7)
+  {Authority Service (Andorra)\\[-2pt]{\scriptsize read-only $\cdot$ AUTHORITY JWT only}};
+\node[rds] (ra)  at (5.5,-0.6)
+  {Redis (Andorra)\\[-2pt]{\scriptsize locks $\cdot$ counters}};
+\node[db]  (ma)  at (5.5,-1.9)
+  {MongoDB (Andorra)\\[-2pt]{\scriptsize bookings $\cdot$ osm\_nodes $\cdot$ osm\_edges}};
+
+\begin{pgfonlayer}{background}
+  \node[cbox, fit=(rsa)(vsa)(dsa)(asa)(ra)(ma)] (andorrabox) {};
+\end{pgfonlayer}
+\node[above=3pt of andorrabox, font=\normalsize\bfseries, color=gray!65!black]
+  {\textsc{Andorra Cluster}};
+
+% ── GLOBAL SERVICES ──────────────────────────────────────────────────────────
+\node[glb] (bs)  at (-5.5, 7.8)
+  {Booking Service ×2\\[-2pt]{\scriptsize Kafka producer $\cdot$ outbox $\cdot$ idempotency}};
+\node[glb] (jm)  at (0, 7.8)
+  {Journey Management ×2\ \ $\bigstar$\\[-2pt]{\scriptsize overlay planner $\cdot$ saga coordinator $\cdot$ leader election}};
+\node[glb] (ns)  at (5.5, 7.8)
+  {Notification Service ×2\\[-2pt]{\scriptsize WebSocket server $\cdot$ Redis pub/sub}};
+\node[glb] (ur)  at (-2.75, 6.5)
+  {User Registry\\[-2pt]{\scriptsize bcrypt $\cdot$ JWT issuance $\cdot$ role management}};
+\node[glb] (dsg) at ( 2.75, 6.5)
+  {Data Service (Global)\\[-2pt]{\scriptsize sagas $\cdot$ audit logs $\cdot$ flags}};
+
+\begin{pgfonlayer}{background}
+  \node[gbox, fit=(bs)(jm)(ns)(ur)(dsg)] (globalbox) {};
+\end{pgfonlayer}
+\node[above=3pt of globalbox, font=\normalsize\bfseries, color=blue!55!black]
+  {\textsc{Global Services}};
+
+% ── NGINX ────────────────────────────────────────────────────────────────────
+\node[gw] (nginx) at (1.0, 10.1)
+  {NGINX API Gateway\ \ :80\\[-2pt]
+   {\small least\_conn $\cdot$ ip\_hash (WebSocket) $\cdot$ proxy\_next\_upstream failover}};
+
+% ── DRIVER ───────────────────────────────────────────────────────────────────
+\node[cli] (driver) at (-4.5, 10.1)
+  {Driver Browser\\[-2pt]{\small Booking UI $\cdot$ WebSocket client}};
+
+% ── KAFKA ────────────────────────────────────────────────────────────────────
+\node[kfk] (kafka) at (0, -3.3)
+  {Apache Kafka\\[-3pt]
+   {\small booking-requests\ \ $\cdot$\ \ booking-outcomes\ \ $\cdot$\ \ capacity-releases}};
+
+% ── ARROWS ───────────────────────────────────────────────────────────────────
+
+% Driver → NGINX
+\draw[arr] (driver.east) -- (nginx.west);
+
+% NGINX → Global Services
+\draw[arr] (nginx.south) -- (nginx.south |- globalbox.north);
+
+% Global Services → each cluster (drop from bottom of globalbox to cluster top)
+\foreach \cbox in {laosbox, cambodiabox, andorrabox}{
+  \draw[arr]
+    (globalbox.south -| \cbox.north)
+    --
+    (\cbox.north);
+}
+
+% Global Services ↔ Kafka  (straight down, both centred at x ≈ 0)
+\draw[barr]
+  (globalbox.south)
+  --
+  (globalbox.south |- kafka.north);
+
+% Each cluster ↔ Kafka
+\foreach \cbox in {laosbox, cambodiabox, andorrabox}{
+  \draw[barr]
+    (\cbox.south)
+    --
+    (\cbox.south |- kafka.north);
+}
+
+\end{tikzpicture}%
+}
+\caption{Architecture of the distributed traffic booking service.
+  Three independent regional clusters (Laos, Cambodia, Andorra) each contain a route
+  service, validation service (two instances), data service (two instances), authority
+  service, Redis instance, and MongoDB instance.
+  Global services --- booking service, journey management (with Redis leader election),
+  and notification service --- run as two instances each behind NGINX and interact with
+  all three clusters via Apache Kafka.}
+\label{fig:architecture}
+\end{figure}

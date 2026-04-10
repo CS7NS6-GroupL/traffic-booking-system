@@ -322,7 +322,7 @@
     <!-- ══════════════════════════ SYSTEM HEALTH TAB ═════════════════════════ -->
     <div id="tab-health" class="d-none">
       <div class="d-flex justify-content-between align-items-center mb-3">
-        <span class="section-title mb-0">18 application services across 3 regions + 6 global — pinging /health</span>
+        <span class="section-title mb-0">18 application services — 6 global + 4 per region × 3 regions — pinging /health</span>
         <button class="btn btn-sm" style="color:#388bfd;background:none;border:1px solid #388bfd;padding:2px 14px;font-size:0.75rem" onclick="checkHealth()">
           <i class="bi bi-arrow-clockwise me-1"></i>Refresh All
         </button>
@@ -663,11 +663,11 @@ const SERVICE_GROUPS = [
     label: 'Global',
     color: '#388bfd',
     services: [
-      { name:'Booking Service',       path:'/api/health/booking',     desc:'Entry point — JWT + Kafka producer' },
+      { name:'Booking Service',       path:'/api/health/booking',     desc:'Entry point — JWT · outbox · idempotency · Kafka producer' },
       { name:'User Registry',         path:'/api/health/user',        desc:'Global auth — register, login, JWT' },
-      { name:'Journey Management',    path:'/api/health/journey',     desc:'Overlay planner + saga coordinator' },
-      { name:'Notification Service',  path:'/api/health/notification',desc:'WebSocket push, Kafka consumer' },
-      { name:'Data Gateway',          path:'/api/health/gateway',     desc:'Cross-region HTTP + Atlas fallback' },
+      { name:'Journey Management',    path:'/api/health/journey',     desc:'Overlay planner · saga coordinator · Redis leader election' },
+      { name:'Notification Service',  path:'/api/health/notification',desc:'WebSocket push · Kafka consumer · Redis pub/sub fanout' },
+      { name:'Data Gateway',          path:'/api/health/gateway',     desc:'Cross-region HTTP proxy — sagas · audit logs · flags' },
       { name:'Data Service',          path:'/api/health/data',        desc:'Saga storage — global MongoDB' },
     ],
   },
@@ -738,7 +738,7 @@ async function checkHealth() {
     const results = await Promise.all(g.services.map(async s => {
       const t0 = Date.now();
       try {
-        const d = await fetch(s.path).then(r => r.json());
+        const d = await fetch(s.path, { cache: 'no-store' }).then(r => r.json());
         const ms = Date.now() - t0;
         document.getElementById(`hdot-${s._idx}`).className = 'dot dot-up';
         document.getElementById(`hcard-${s._idx}`).classList.add('up');
