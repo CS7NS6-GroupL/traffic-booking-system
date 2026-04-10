@@ -210,13 +210,19 @@ services:
         condition: service_healthy
     networks:
       - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # Regional data-service instances — bookings stored per region
-  data-service-laos:
+
+  data-service-laos-1:
     build:
       context: .
       dockerfile: services/data/Dockerfile
-    container_name: data-service-laos
     restart: unless-stopped
     ports:
       - "8019:8009"
@@ -228,13 +234,43 @@ services:
       mongo-laos:
         condition: service_healthy
     networks:
-      - traffic-net
+      traffic-net:
+        aliases:
+          - data-service-laos
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
-  data-service-cambodia:
+  data-service-laos-2:
     build:
       context: .
       dockerfile: services/data/Dockerfile
-    container_name: data-service-cambodia
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: data-service-laos
+      REGION: laos
+      MONGO_URI: mongodb://mongo-laos:27017
+    depends_on:
+      mongo-laos:
+        condition: service_healthy
+    networks:
+      traffic-net:
+        aliases:
+          - data-service-laos
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  data-service-cambodia-1:
+    build:
+      context: .
+      dockerfile: services/data/Dockerfile
     restart: unless-stopped
     ports:
       - "8029:8009"
@@ -246,13 +282,43 @@ services:
       mongo-cambodia:
         condition: service_healthy
     networks:
-      - traffic-net
+      traffic-net:
+        aliases:
+          - data-service-cambodia
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
-  data-service-andorra:
+  data-service-cambodia-2:
     build:
       context: .
       dockerfile: services/data/Dockerfile
-    container_name: data-service-andorra
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: data-service-cambodia
+      REGION: cambodia
+      MONGO_URI: mongodb://mongo-cambodia:27017
+    depends_on:
+      mongo-cambodia:
+        condition: service_healthy
+    networks:
+      traffic-net:
+        aliases:
+          - data-service-cambodia
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  data-service-andorra-1:
+    build:
+      context: .
+      dockerfile: services/data/Dockerfile
     restart: unless-stopped
     ports:
       - "8039:8009"
@@ -264,7 +330,38 @@ services:
       mongo-andorra:
         condition: service_healthy
     networks:
-      - traffic-net
+      traffic-net:
+        aliases:
+          - data-service-andorra
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  data-service-andorra-2:
+    build:
+      context: .
+      dockerfile: services/data/Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: data-service-andorra
+      REGION: andorra
+      MONGO_URI: mongodb://mongo-andorra:27017
+    depends_on:
+      mongo-andorra:
+        condition: service_healthy
+    networks:
+      traffic-net:
+        aliases:
+          - data-service-andorra
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # Regional authority-service instances — each authority can only see its own region
   authority-service-laos:
@@ -282,10 +379,16 @@ services:
       REGION: laos
       DATA_SERVICE_URL: http://data-service-laos:8009
     depends_on:
-      data-service-laos:
+      data-service-laos-1:
         condition: service_started
     networks:
       - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   authority-service-cambodia:
     build:
@@ -302,10 +405,16 @@ services:
       REGION: cambodia
       DATA_SERVICE_URL: http://data-service-cambodia:8009
     depends_on:
-      data-service-cambodia:
+      data-service-cambodia-1:
         condition: service_started
     networks:
       - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   authority-service-andorra:
     build:
@@ -322,16 +431,21 @@ services:
       REGION: andorra
       DATA_SERVICE_URL: http://data-service-andorra:8009
     depends_on:
-      data-service-andorra:
+      data-service-andorra-1:
         condition: service_started
     networks:
       - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
-  notification-service:
+  notification-service-1:
     build:
       context: .
       dockerfile: services/notification-service/Dockerfile
-    container_name: notification-service
     restart: unless-stopped
     ports:
       - "8007:8000"
@@ -339,20 +453,55 @@ services:
       - services/notification-service/.env
     environment:
       SERVICE_NAME: notification-service
+      REDIS_PUBSUB_URL: redis://redis-laos:6379
     depends_on:
       kafka:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
     networks:
-      - traffic-net
+      traffic-net:
+        aliases:
+          - notification-service
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  notification-service-2:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - services/notification-service/.env
+    environment:
+      SERVICE_NAME: notification-service
+      REDIS_PUBSUB_URL: redis://redis-laos:6379
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    networks:
+      traffic-net:
+        aliases:
+          - notification-service
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # Data Service — single source of truth for all MongoDB access
-  data-service:
+
+  data-service-1:
     build:
       context: .
       dockerfile: services/data/Dockerfile
-    container_name: data-service
     restart: unless-stopped
     ports:
       - "8009:8009"
@@ -363,15 +512,44 @@ services:
       mongo:
         condition: service_healthy
     networks:
-      - traffic-net
+      traffic-net:
+        aliases:
+          - data-service
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  data-service-2:
+    build:
+      context: .
+      dockerfile: services/data/Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: data-service
+      MONGO_URI: mongodb://mongo:27017
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      traffic-net:
+        aliases:
+          - data-service
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # Journey Management is global — it holds the region overlay graph and
   # coordinates cross-region sagas via Kafka.
-  journey-management:
+  journey-management-1:
     build:
       context: .
       dockerfile: services/journey-management/Dockerfile
-    container_name: journey-management
     restart: unless-stopped
     ports:
       - "8008:8000"
@@ -388,6 +566,7 @@ services:
       CAMBODIA_ROUTE_URL: http://route-service-cambodia:8000
       GATEWAY_LAOS_EXIT: border-laos-camb
       GATEWAY_CAMBODIA_ENTRY: border-camb-laos
+      REDIS_LEADER_URL: redis://redis-laos:6379
     depends_on:
       kafka:
         condition: service_healthy
@@ -395,16 +574,69 @@ services:
         condition: service_completed_successfully
       mongo:
         condition: service_healthy
-      data-service:
+      data-service-1:
         condition: service_started
-      data-service-laos:
+      data-service-laos-1:
         condition: service_started
-      data-service-cambodia:
+      data-service-cambodia-1:
         condition: service_started
-      data-service-andorra:
+      data-service-andorra-1:
         condition: service_started
     networks:
-      - traffic-net
+      traffic-net:
+        aliases:
+          - journey-management
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  journey-management-2:
+    build:
+      context: .
+      dockerfile: services/journey-management/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - services/journey-management/.env
+    environment:
+      SERVICE_NAME: journey-management
+      DATA_SERVICE_URL: http://data-service:8009
+      DATA_SERVICE_LAOS: http://data-service-laos:8009
+      DATA_SERVICE_CAMBODIA: http://data-service-cambodia:8009
+      DATA_SERVICE_ANDORRA: http://data-service-andorra:8009
+      ANDORRA_ROUTE_URL: http://route-service-andorra:8000
+      LAOS_ROUTE_URL: http://route-service-laos:8000
+      CAMBODIA_ROUTE_URL: http://route-service-cambodia:8000
+      GATEWAY_LAOS_EXIT: border-laos-camb
+      GATEWAY_CAMBODIA_ENTRY: border-camb-laos
+      REDIS_LEADER_URL: redis://redis-laos:6379
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      mongo:
+        condition: service_healthy
+      data-service-1:
+        condition: service_started
+      data-service-laos-1:
+        condition: service_started
+      data-service-cambodia-1:
+        condition: service_started
+      data-service-andorra-1:
+        condition: service_started
+    networks:
+      traffic-net:
+        aliases:
+          - journey-management
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   data-gateway:
     build:
@@ -424,14 +656,19 @@ services:
         condition: service_healthy
     networks:
       - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ── Laos cluster ────────────────────────────────────────────────────────────
 
-  booking-service:
+  booking-service-1:
     build:
       context: .
       dockerfile: services/booking-service/Dockerfile
-    container_name: booking-service
     restart: unless-stopped
     ports:
       - "8001:8000"
@@ -448,8 +685,49 @@ services:
         condition: service_completed_successfully
       mongo:
         condition: service_healthy
+      journey-management-1:
+        condition: service_healthy
     networks:
-      - traffic-net
+      traffic-net:
+        aliases:
+          - booking-service
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  booking-service-2:
+    build:
+      context: .
+      dockerfile: services/booking-service/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - services/booking-service/.env
+    environment:
+      SERVICE_NAME: booking-service
+      REGION: laos
+      JOURNEY_MANAGEMENT_URL: http://journey-management:8000
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      mongo:
+        condition: service_healthy
+      journey-management-1:
+        condition: service_healthy
+    networks:
+      traffic-net:
+        aliases:
+          - booking-service
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   route-service-laos:
     build:
@@ -470,12 +748,17 @@ services:
         condition: service_healthy
     networks:
       - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
-  validation-service-laos:
+  validation-service-laos-1:
     build:
       context: .
       dockerfile: services/validation-service/Dockerfile
-    container_name: validation-service-laos
     restart: unless-stopped
     ports:
       - "8005:8000"
@@ -496,10 +779,49 @@ services:
         condition: service_healthy
       mongo-laos:
         condition: service_healthy
-      data-service-laos:
+      data-service-laos-1:
         condition: service_started
     networks:
       - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  validation-service-laos-2:
+    build:
+      context: .
+      dockerfile: services/validation-service/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - services/validation-service/.env
+    environment:
+      SERVICE_NAME: validation-service-laos
+      REGION: laos
+      REDIS_URL: redis://redis-laos:6379
+      MONGO_URI: mongodb://mongo-laos:27017
+      DATA_SERVICE_URL: http://data-service-laos:8009
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      redis-laos:
+        condition: service_healthy
+      mongo-laos:
+        condition: service_healthy
+      data-service-laos-1:
+        condition: service_started
+    networks:
+      - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ── Cambodia cluster ─────────────────────────────────────────────────────────
 
@@ -522,12 +844,17 @@ services:
         condition: service_healthy
     networks:
       - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
-  validation-service-cambodia:
+  validation-service-cambodia-1:
     build:
       context: .
       dockerfile: services/validation-service/Dockerfile
-    container_name: validation-service-cambodia
     restart: unless-stopped
     ports:
       - "8015:8000"
@@ -548,10 +875,49 @@ services:
         condition: service_healthy
       mongo-cambodia:
         condition: service_healthy
-      data-service-cambodia:
+      data-service-cambodia-1:
         condition: service_started
     networks:
       - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  validation-service-cambodia-2:
+    build:
+      context: .
+      dockerfile: services/validation-service/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - services/validation-service/.env
+    environment:
+      SERVICE_NAME: validation-service-cambodia
+      REGION: cambodia
+      REDIS_URL: redis://redis-cambodia:6379
+      MONGO_URI: mongodb://mongo-cambodia:27017
+      DATA_SERVICE_URL: http://data-service-cambodia:8009
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      redis-cambodia:
+        condition: service_healthy
+      mongo-cambodia:
+        condition: service_healthy
+      data-service-cambodia-1:
+        condition: service_started
+    networks:
+      - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ── Andorra cluster (isolated) ───────────────────────────────────────────────
 
@@ -574,12 +940,17 @@ services:
         condition: service_healthy
     networks:
       - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
-  validation-service-andorra:
+  validation-service-andorra-1:
     build:
       context: .
       dockerfile: services/validation-service/Dockerfile
-    container_name: validation-service-andorra
     restart: unless-stopped
     ports:
       - "8025:8000"
@@ -600,10 +971,49 @@ services:
         condition: service_healthy
       mongo-andorra:
         condition: service_healthy
-      data-service-andorra:
+      data-service-andorra-1:
         condition: service_started
     networks:
       - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  validation-service-andorra-2:
+    build:
+      context: .
+      dockerfile: services/validation-service/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - services/validation-service/.env
+    environment:
+      SERVICE_NAME: validation-service-andorra
+      REGION: andorra
+      REDIS_URL: redis://redis-andorra:6379
+      MONGO_URI: mongodb://mongo-andorra:27017
+      DATA_SERVICE_URL: http://data-service-andorra:8009
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      redis-andorra:
+        condition: service_healthy
+      mongo-andorra:
+        condition: service_healthy
+      data-service-andorra-1:
+        condition: service_started
+    networks:
+      - traffic-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ── NGINX (global API gateway + static frontend) ────────────────────────────
 
@@ -616,15 +1026,18 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - booking-service
+      - booking-service-1
+      - booking-service-2
       - user-registry
       - authority-service-laos
       - authority-service-cambodia
       - authority-service-andorra
-      - journey-management
-      - notification-service
+      - journey-management-1
+      - journey-management-2
+      - notification-service-1
+      - notification-service-2
       - route-service-laos
-      - validation-service-laos
+      - validation-service-laos-1
       - data-gateway
     networks:
       - traffic-net
