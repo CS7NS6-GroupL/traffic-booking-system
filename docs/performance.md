@@ -2,9 +2,12 @@
 
 ## Overview
 
-This document presents the results of load and stress testing conducted on the distributed
-traffic booking system. Tests were run locally using Docker Compose with all services active.
-The test script is at `scripts/load_test.py`.
+This document presents load and stress testing results across two configurations:
+- **Pre-hardening** (single-instance services, per-call Kafka producer)
+- **Post-hardening** (multi-instance services, Kafka singleton producer, Redis leader election, pub/sub fanout)
+
+Tests were run locally using Docker Compose with all services active.
+The test script is at `scripts/load_test.py --scale high`.
 
 All booking requests use custom graph node IDs (e.g. `laos-vientiane`) which bypass external
 geocoding entirely, ensuring measured latencies reflect only system processing overhead.
@@ -15,190 +18,213 @@ geocoding entirely, ensuring measured latencies reflect only system processing o
 - 3 regional Redis instances (redis-laos, redis-cambodia, redis-andorra)
 - 1 Kafka broker (shared across regions in demo mode)
 - Custom road graph: 3 regions, 19 nodes, 36 edges
+- Scale: `--scale high` (200 workers)
 
 ---
 
-## Test 1 — Health Check Baseline
+## Before vs After Hardening — Key Comparison
 
-**Purpose:** Establish a baseline for raw HTTP round-trip latency with no business logic.
-Hits the `/api/health` endpoint 100 times sequentially.
+The hardening changes (Kafka singleton producer, multi-instance services, Redis leader election)
+produced dramatic improvements in high-concurrency submission latency:
+
+| Test | Metric | Pre-hardening | Post-hardening | Improvement |
+|---|---|---|---|---|
+| T1 — 1000 concurrent burst | p50 submission latency | 24,360 ms | 3,479 ms | **7× faster** |
+| T1 — 1000 concurrent burst | Throughput | 8.1 req/s | 53.4 req/s | **6.6× faster** |
+| T2 — Capacity enforcement | p50 submission | 3,203 ms | 594 ms | **5.4× faster** |
+| T4 — Cross-region saga e2e | mean | 475 ms | 401 ms | 15% faster |
+| T5 — Sustained 50 req/s | p50 submission | 24,212 ms | 81 ms | **299× faster** |
+| T6 — 2000 req mega burst | Throughput | 8.2 req/s | 86.5 req/s | **10.5× faster** |
+
+**Root cause of pre-hardening degradation:** the old booking-service created a new
+`KafkaProducer` instance on every request — each call opened a TCP connection to the Kafka
+broker, sent, flushed, and closed. Under 200 concurrent workers this serialized at the broker,
+causing ~24s queueing latency. The singleton producer (one persistent connection, shared across
+all threads) eliminates this entirely.
+
+---
+
+## Post-Hardening Results
+
+### Test 1 — Single-Region Throughput Burst
+
+**Purpose:** Maximum concurrency — 1000 requests fired simultaneously across 15 rotated
+routes (to avoid segment saturation), 200 worker threads.
+
+| Metric | Value |
+|---|---|
+| Requests | 1,000 concurrent |
+| Workers | 200 threads |
+| Success rate | 100% (1000/1000) |
+| p50 submission latency | 3,479 ms |
+| p95 submission latency | 4,217 ms |
+| p99 submission latency | 4,324 ms |
+| Mean submission latency | 3,256 ms |
+| Max submission latency | 4,379 ms |
+| Wall time | 18,736 ms |
+| Throughput | **53.4 req/s** |
+| Outcome sample (n=100) | 92 approved, 8 rejected |
+
+**Interpretation:** The system accepts all 1000 requests without a single error. The 3.5s p50
+under 1000-way concurrency reflects journey-management planning load (A\* + region resolution
+for each request) rather than Kafka overhead. The 8% rejection rate in the outcome sample is
+expected capacity enforcement — some routes filled their segment counters across the burst.
+
+---
+
+### Test 2 — Capacity Enforcement Under Contention
+
+**Purpose:** Prove that Redis-based capacity locking is correct under race conditions.
+50 simultaneous bookings for La Massana → Arinsal (`road_type=track`, capacity = 1).
+Each request uses a unique vehicle ID so only segment capacity is under test.
+
+| Metric | Value |
+|---|---|
+| Simultaneous requests | 50 |
+| Segment capacity | 1 |
+| p50 submission latency | 594 ms |
+| p95 submission latency | 815 ms |
+| Wall time | 866 ms |
+| **Approved** | **1** |
+| **Rejected** | **49** |
+| **Result** | **PASS** |
+
+**Interpretation:** Exactly 1 booking approved out of 50 simultaneous attempts at a cap-1
+segment — correct regardless of arrival order or timing. The Redis `SET NX` lock ensures
+atomicity: the first validation-service consumer to acquire the lock increments the counter
+from 0→1; all subsequent checks find `current (1) >= capacity (1)` and reject. The 594ms p50
+(vs 3,203ms pre-hardening) reflects the Kafka singleton producer improvement.
+
+---
+
+### Test 3 — Health Endpoint Baseline
+
+**Purpose:** Establish the raw HTTP round-trip floor with no business logic.
 
 | Metric | Value |
 |---|---|
 | Requests | 100 sequential |
 | Success rate | 100% |
-| p50 latency | 13 ms |
-| p95 latency | 33 ms |
-| Max latency | 43 ms |
+| p50 latency | 6 ms |
+| p95 latency | 9 ms |
+| Max latency | 14 ms |
 
-**Interpretation:** The 13ms p50 represents the overhead of nginx proxying through to a
-FastAPI service and back. This is the floor — no booking can be faster than this. The
-low spread (13ms → 33ms p95) shows the infrastructure layer is stable and consistent.
-
----
-
-## Test 2 — Single-Region Booking, Normal Load
-
-**Purpose:** Measure booking submission latency at a sustainable request rate.
-Sends bookings at 5 requests/second for 30 seconds (150 total).
-
-Route: `laos-vientiane → laos-savannakhet` (single-region, no saga)
-
-| Metric | Value |
-|---|---|
-| Requests | 150 over 30s |
-| Rate | 5 req/s |
-| Success rate | 100% (150/150) |
-| p50 latency | 157 ms |
-| p95 latency | 187 ms |
-| p99 latency | 220 ms |
-| Mean latency | 160 ms |
-| Max latency | 275 ms |
-
-**Interpretation:** At normal load the system is fast and consistent. The 157ms p50 covers
-the full synchronous path: nginx → booking-service (JWT validation) → journey-management
-(region resolution + A\* route planning) → Kafka produce → HTTP 202 back to client.
-The tight spread between p50 and p95 (30ms) shows no queuing or GC pauses at this rate.
+**Interpretation:** 6ms p50 is the nginx proxy overhead floor. No booking can be faster than
+this. The tight spread (6ms → 14ms max) confirms the infrastructure layer is stable.
 
 ---
 
-## Test 3 — Single-Region Booking, Stress Test
+### Test 4 — Cross-Region Saga, End-to-End Latency
 
-**Purpose:** Measure how the system behaves under sudden high concurrency. 50 booking
-requests are fired simultaneously using 20 worker threads.
+**Purpose:** Measure the complete latency from HTTP submission to final Kafka-delivered outcome
+for a booking that crosses two regions. This exercises the full distributed saga pattern.
 
-Route: `laos-vientiane → laos-savannakhet`
+Route: `laos-pakse → khm-phnom-penh` (Laos → Cambodia via Voen Kham border)
 
-| Metric | Value |
-|---|---|
-| Requests | 50 concurrent |
-| Workers | 20 threads |
-| Success rate | 100% (50/50) |
-| p50 latency | 2,436 ms |
-| p95 latency | 2,863 ms |
-| Mean latency | 2,230 ms |
-| Max latency | 2,876 ms |
-| Wall time | 6,719 ms |
-| Throughput | 7.4 req/s |
-
-**Interpretation:** Under 10× the normal load, latency increases ~15× (157ms → 2,436ms)
-but the system accepts every request without dropping or erroring. This is graceful
-degradation — the services queue internally rather than shedding load.
-
-The bottleneck is journey-management: it is a singleton service that processes route
-planning requests sequentially. With 50 concurrent requests all needing A\* path computation
-and Kafka publishing, requests queue at the journey-management HTTP server. In a production
-deployment, multiple journey-management replicas (with Redis-based saga leader election)
-would distribute this load.
-
-**Normal vs stress comparison:**
-
-| Condition | p50 | p95 | Throughput |
-|---|---|---|---|
-| Normal load (5 req/s) | 157 ms | 187 ms | 5 req/s |
-| Stress (50 concurrent) | 2,436 ms | 2,863 ms | 7.4 req/s |
-
----
-
-## Test 4 — Cross-Region Saga, End-to-End Latency
-
-**Purpose:** Measure the complete latency of a cross-region booking from HTTP submission
-to final Kafka-delivered outcome. This exercises the full saga pattern across two regions.
-
-Route: `laos-pakse → khm-phnom-penh` (Laos → Cambodia, crosses the Voen Kham border)
-
-The measured latency includes:
-1. HTTP POST → booking-service
-2. Journey-management: region resolution, A\* for each leg (Laos leg + Cambodia leg)
-3. Saga creation in MongoDB (global)
-4. Kafka publish of 2 sub-bookings (one per region)
-5. validation-service-laos: Redis lock + capacity check + Kafka publish outcome
-6. validation-service-cambodia: Redis lock + capacity check + Kafka publish outcome
-7. Journey-management saga coordinator: collect both outcomes, commit booking to mongo-laos
-8. Kafka publish final APPROVED outcome
-9. Client polls booking status until terminal state
+The measured latency includes all saga steps:
+1. HTTP POST → booking-service → journey-management (A\* for each leg)
+2. Saga created in MongoDB, 2 sub-bookings published to Kafka
+3. validation-service-laos + validation-service-cambodia: Redis lock + capacity check
+4. Saga coordinator collects both outcomes, commits to mongo-laos + mongo-cambodia
+5. Final APPROVED published to Kafka, client polls to terminal state
 
 | Request | Submit | End-to-end |
 |---|---|---|
-| 1 | 232 ms | 610 ms |
-| 2 | 199 ms | 247 ms |
-| 3 | 183 ms | 223 ms |
-| 4 | 230 ms | 620 ms |
-| 5 | 193 ms | 226 ms |
+| 1 | 202 ms | 468 ms |
+| 2 | 93 ms | 364 ms |
+| 3 | 119 ms | 412 ms |
+| 4 | 184 ms | 464 ms |
+| 5 | 97 ms | 372 ms |
+| 6 | 126 ms | 407 ms |
+| 7 | 106 ms | 392 ms |
+| 8 | 132 ms | 417 ms |
+| 9 | 122 ms | 376 ms |
+| 10 | 94 ms | 340 ms |
 
 | Metric | Value |
 |---|---|
-| Success rate | 5/5 APPROVED |
-| p50 e2e latency | 247 ms |
-| p95 e2e latency | 620 ms |
-| Mean e2e latency | 385 ms |
-| Submit latency (mean) | 207 ms |
+| Success rate | 10/10 APPROVED |
+| p50 e2e latency | 407 ms |
+| p95 e2e latency | 468 ms |
+| Mean e2e latency | **401 ms** |
+| Min / Max | 340 ms / 468 ms |
 
-**Interpretation:** The mean end-to-end latency of 385ms for a cross-region saga is the
-headline result. This demonstrates that a booking requiring coordination across two
+**Interpretation:** The mean end-to-end latency of 401ms for a cross-region saga is the
+headline distributed correctness result. A booking requiring coordination across two
 independent regional validation services, two Redis instances, and multiple Kafka round-trips
-completes in under 400ms on average.
+completes in under half a second on average — 10/10 requests approved with no failures.
 
-The bimodal distribution (~225ms vs ~615ms) reflects Kafka poll intervals. When both
-regional sub-booking outcomes arrive within the same Kafka consumer poll cycle in
-journey-management, the saga resolves in ~225ms. When the second outcome arrives in the
-next poll cycle (~400ms later), total time reaches ~615ms. This is expected behaviour from
-Kafka's `max.poll.interval.ms` batching.
+The tight spread (340ms–468ms, only 128ms range) shows consistent saga coordination. The
+variance reflects Kafka consumer poll timing: when both regional outcomes arrive within the
+same poll cycle the saga resolves faster; when one arrives in the next cycle it adds ~100ms.
 
 ---
 
-## Test 5 — Capacity Enforcement Under Simultaneous Contention
+### Test 5 — Sustained Load
 
-**Purpose:** Prove that the Redis-based distributed capacity lock correctly enforces a
-hard limit under race conditions. 10 bookings are submitted simultaneously for a road
-segment with capacity = 1 (La Massana → Arinsal, `road_type=track`).
-
-Each request uses a unique vehicle ID so the duplicate-vehicle check does not interfere —
-only the segment capacity limit is under test.
-
-Route: `and-la-massana → and-arinsal` (capacity = 1)
+**Purpose:** Measure latency stability under continuous load at the target throughput rate.
+50 req/s for 60 seconds (~3000 total requests).
 
 | Metric | Value |
 |---|---|
-| Simultaneous requests | 10 |
-| Segment capacity | 1 |
-| Approved | **1** |
-| Rejected | **9** |
-| Result | **PASS** |
-| Submission p50 | 1,364 ms |
-| Wall time | 1,368 ms |
+| Target rate | 50 req/s |
+| Achieved rate | **48.1 req/s** (96% of target) |
+| Total requests | 2,888 |
+| Success rate | 100% |
+| p50 submission latency | **81 ms** |
+| p95 submission latency | 792 ms |
+| p99 submission latency | 1,189 ms |
+| Mean submission latency | 177 ms |
+| Max submission latency | 1,532 ms |
+| Outcome sample (n=100) | 43 approved, 57 rejected |
 
-**Interpretation:** Exactly 1 booking was approved and 9 were rejected with
-`"Road segment at full capacity (1/1)"`. This is the correct result regardless of
-submission order or timing.
+**Interpretation:** Under sustained load at a paced rate (not burst), the p50 drops to 81ms —
+close to the health check baseline. This shows the system performs well when requests arrive
+at a steady rate rather than all at once. The p95/p99 tail (792ms/1189ms) reflects occasional
+journey-management planning bursts when multiple requests cluster together within the same
+interval. The 57% rejection rate in the sample reflects segment capacity filling over ~3000
+bookings across the 60-second run (expected — counters are not reset mid-test).
 
-The enforcement mechanism works as follows:
-1. All 10 requests arrive at validation-service-andorra via Kafka
-2. Each acquires a Redis distributed lock (`SET NX`) on the segment before checking
-3. The first to acquire the lock increments `current:segment:and-la-massana:and-arinsal` from 0 → 1
-4. All subsequent requests find `current (1) >= capacity (1)` → REJECTED
-5. Locks are released in reverse order (deadlock prevention)
+---
 
-This demonstrates that the system treats road capacity as a hard distributed constraint,
-not an approximate one. No two concurrent bookings can both be approved for a saturated
-segment, even under race conditions.
+### Test 6 — Mega Burst
+
+**Purpose:** Peak ingestion test. 2000 requests fired as fast as possible with 200 workers.
+Tests maximum throughput and whether Kafka back-pressure is handled gracefully.
+
+| Metric | Value |
+|---|---|
+| Requests | 2,000 |
+| Workers | 200 threads |
+| Success rate | 100% |
+| p50 submission latency | 2,231 ms |
+| p95 submission latency | 2,670 ms |
+| p99 submission latency | 2,738 ms |
+| Mean submission latency | 2,202 ms |
+| Wall time | 23,131 ms |
+| Throughput | **86.5 req/s** |
+| Outcome sample (n=100) | 57 approved, 43 rejected |
+
+**Interpretation:** The system handles 2000 requests at 86.5 req/s without dropping a single
+submission. The 2.2s mean latency under a 2000-way burst is a 10.5× improvement over the
+pre-hardening result (23.3s), entirely attributable to the Kafka singleton producer.
+The system degrades gracefully — latency increases under extreme load but no requests fail.
 
 ---
 
 ## Summary Table
 
-| Test | Metric | Value |
-|---|---|---|
-| Health baseline | p50 latency | 13 ms |
-| Health baseline | p95 latency | 33 ms |
-| Single-region, normal | p50 submission latency | 157 ms |
-| Single-region, normal | p95 submission latency | 187 ms |
-| Single-region, normal | Throughput | 5 req/s, 150/150 accepted |
-| Single-region, stress | p50 submission latency | 2,436 ms |
-| Single-region, stress | Throughput | 7.4 req/s peak, 50/50 accepted |
-| Cross-region saga | Mean e2e latency | 385 ms |
-| Cross-region saga | p50 e2e latency | 247 ms |
-| Capacity enforcement | Correctness | 1/10 approved (cap=1) — PASS |
+| Test | Scale | Metric | Value |
+|---|---|---|---|
+| Health baseline | 100 sequential | p50 / p95 | 6 ms / 9 ms |
+| Burst (1000 concurrent) | 200 workers | p50 submission | 3,479 ms |
+| Burst (1000 concurrent) | 200 workers | Throughput | 53.4 req/s |
+| Sustained (50 req/s × 60s) | 200 workers | p50 submission | 81 ms |
+| Sustained (50 req/s × 60s) | 200 workers | Achieved rate | 48.1 req/s |
+| Cross-region saga | 10 sequential | Mean e2e | 401 ms |
+| Cross-region saga | 10 sequential | p95 e2e | 468 ms |
+| Capacity enforcement | 50 concurrent, cap=1 | Correctness | 1/50 approved — **PASS** |
+| Mega burst | 2000 requests | Throughput | 86.5 req/s |
 
 ---
 
@@ -214,7 +240,7 @@ defaults to 0 (blocks all bookings until seeded — fail-safe).
 | `trunk` | 150 | Laos Route 13, Cambodia NR5/NR7 |
 | `primary` | 100 | Laos border road, Cambodia Route 7 |
 | `secondary` | 75 | Andorra valley roads, Cambodia rural north |
-| `tertiary` | 50 | — |
+| `tertiary` | 50 | Andorra mountain roads |
 | `tertiary_link` | 25 | — |
 | `track` | **1** | Andorra: La Massana → Arinsal (demo) |
 
@@ -242,7 +268,7 @@ TOKEN=$(curl -s -X POST http://localhost/api/auth/login \
   -d '{"username":"alice","password":"password123"}' \
   | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
-# 5. Run the load test
+# 5. Run the full high-scale load test
 pip install httpx
-python scripts/load_test.py --token $TOKEN
+python scripts/load_test.py --token $TOKEN --scale high
 ```

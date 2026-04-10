@@ -92,8 +92,8 @@ KAFKA  topic: booking-outcomes
     └──▶ NOTIFICATION-SERVICE (notification-group)
              1. Receives message
              2. Checks is_sub_booking — not set, so this is final
-             3. Looks up WebSocket connection for driver_id
-             4. asyncio.run_coroutine_threadsafe → ws.send_json(payload)
+             3. Publishes to Redis "notifications" channel (_pub_redis)
+             4. _redis_subscriber_loop on each instance dispatches to local WebSocket
              ▼
            BROWSER WebSocket
              Receives {outcome:"APPROVED", booking_id, reason, ...}
@@ -182,10 +182,13 @@ KAFKA  topic: booking-outcomes  (2 messages, order not guaranteed)
                1. Get saga; update outcome for cambodia
                2. All regions reported? YES. Any rejected? NO
                3. COMMIT PATH:
-                  a. HTTP POST → data-service-laos:8009/bookings  (origin region)
-                       {booking_id, saga_id, status:"approved",
-                        regions_involved:["laos","cambodia"], ...}
-                       → written to mongo-laos
+                  a. For EACH region in regions_involved ["laos","cambodia"]:
+                       HTTP POST → data-service-{region}:8009/bookings
+                         {booking_id, saga_id, status:"approved",
+                          region: "{region}", segments: [...region-specific segs...],
+                          regions_involved:["laos","cambodia"], ...}
+                         → written to mongo-laos  (laos record)
+                         → written to mongo-cambodia  (cambodia record)
                   b. HTTP PATCH → data-service:8009/sagas/{id}/status
                        {status:"COMMITTED"}  → updated in global mongo
                   c. Produce to "booking-outcomes" (FINAL, no is_sub_booking):
@@ -194,9 +197,15 @@ KAFKA  topic: booking-outcomes  (2 messages, order not guaranteed)
     ▼
 KAFKA  topic: booking-outcomes  (1 final message)
     ▼
-NOTIFICATION-SERVICE
+NOTIFICATION-SERVICE  (any instance — Kafka consumer)
     │  is_sub_booking not set → this is final
-    │  → ws.send_json to driver WebSocket
+    │  → publish to Redis channel "notifications" (_pub_redis)
+    ▼
+REDIS pub/sub channel "notifications"
+    │
+    └──▶ ALL notification-service instances (_redis_subscriber_loop)
+             each instance checks connections dict for driver_id
+             → ws.send_json to local WebSocket if connected
     ▼
 BROWSER  ← "Your booking is APPROVED"
 ```
@@ -269,7 +278,7 @@ AUTHORITY-SERVICE-{REGION}
 | Single-region Laos | approved **and** rejected | validation-service-laos | data-service-laos `/bookings` | mongo-laos |
 | Single-region Cambodia | approved **and** rejected | validation-service-cambodia | data-service-cambodia `/bookings` | mongo-cambodia |
 | Single-region Andorra | approved **and** rejected | validation-service-andorra | data-service-andorra `/bookings` | mongo-andorra |
-| Cross-region saga (commit) | approved | journey-management `_advance_saga` | data-service-{**origin region**} `/bookings` | mongo-{origin} |
+| Cross-region saga (commit) | approved | journey-management `_advance_saga` | data-service-{**each involved region**} `/bookings` | mongo-laos **and** mongo-cambodia |
 | Saga metadata | PENDING/COMMITTED/ABORTED | journey-management `/sagas` | data-service (global) `/sagas` | mongo (global) |
 
 **Known limitation:** single-region validation checks for duplicate vehicles only in the booking's own regional MongoDB. A vehicle booked in Laos would not be seen by Cambodia's validation-service for a separate single-region Cambodia booking. Cross-region sagas handle this correctly — each region independently rejects if the vehicle has an active booking in its own DB, and any single rejection aborts the saga.
@@ -310,7 +319,7 @@ AUTHORITY-SERVICE-{REGION}
 |---|---|---|
 | **NGINX** | Single container | Multiple replicas behind a cloud LB. Terminates TLS. |
 | **booking-service** | Single container | 3+ replicas, stateless — nginx round-robins. |
-| **journey-management** | **Singleton — SPOF** | Needs leader election (Redis `SET NX`) so only one instance runs the saga coordinator consumer. |
+| **journey-management** | **2 instances, leader election** | Redis `SET NX` (30s TTL + renewal) — only the leader runs the saga coordinator consumer. Standby takes over within 30s on leader failure. |
 | **route-service** | One per region, loads full OSM graph in RAM | Persistent graph store (e.g. Neo4j) per region so replicas share graph without each loading it on startup. |
 | **Kafka** | Single broker, shared | 3-broker cluster per region. Cross-region topics use Kafka MirrorMaker. |
 | **Redis** | One instance per region | Redis Cluster (sharded) or Sentinel (HA) per region. |
@@ -319,5 +328,5 @@ AUTHORITY-SERVICE-{REGION}
 | **data-service** | One global + one per region | Multiple replicas behind nginx per region. Stateless. |
 | **authority-service** | One per region | Multiple replicas per region. Role enforcement is stateless. |
 | **Saga timeout** | Not implemented | Background watchdog scans `status:PENDING` sagas older than N seconds and triggers compensating rollback. |
-| **Notification WebSocket** | Connections held in RAM | Sticky sessions (nginx `ip_hash`) or Redis pub/sub so any replica can push to any driver. |
+| **Notification WebSocket** | **Redis pub/sub (implemented)** | Kafka consumer publishes to Redis channel; each instance's subscriber delivers to its own local connections. nginx `ip_hash` for WebSocket stickiness. |
 | **Cross-region network** | All on one Docker bridge | Each region is a separate K8s cluster/VPC. Cross-region traffic over private WAN or VPN. |

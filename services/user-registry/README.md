@@ -17,6 +17,7 @@ Global authentication layer. Manages driver and vehicle identity, issues JWTs ve
 ```json
 { "username": "alice", "password": "secret", "vehicle_id": "veh-001", "role": "DRIVER" }
 ```
+Returns `201 Created` on success, `409 Conflict` if the username is already taken.
 
 ### POST /auth/login
 ```json
@@ -26,10 +27,11 @@ Response: `{ "access_token": "eyJ...", "token_type": "bearer", "role": "DRIVER" 
 
 ## Key Technologies
 - **FastAPI** — REST API
-- **MongoDB** (`pymongo`) — stores driver/vehicle records in `traffic.users`
+- **MongoDB** (`pymongo`) — stores driver/vehicle records in `traffic.users` with a **unique index on `username`** (created at startup)
+- **bcrypt** — passwords are hashed before storage
 - **PyJWT** (via shared/auth.py) — token issuance and validation
 - **JWT roles** — `DRIVER` or `AUTHORITY`
 
 ## Notes
-- Passwords should be hashed (bcrypt) before production use.
+- The unique index on `username` is created at startup via `db.users.create_index("username", unique=True)`. Duplicate registration attempts return `409` instead of crashing with a 500.
 - This service is the single source of truth for identity across all regions.

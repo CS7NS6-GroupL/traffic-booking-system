@@ -12,11 +12,18 @@
 ## 1. Health Checks
 
 ```bash
-# Global services
+# Global services (upstream — hits whichever instance nginx selects)
 curl http://localhost/api/health/booking
 curl http://localhost/api/health/user
 curl http://localhost/api/health/journey
 curl http://localhost/api/health/data
+curl http://localhost/api/health/notification
+
+# Per-instance health (multi-instance services)
+curl http://localhost/api/health/booking-1
+curl http://localhost/api/health/booking-2
+curl http://localhost/api/health/journey-1
+curl http://localhost/api/health/journey-2
 
 # Laos cluster
 curl http://localhost/api/health/route-laos
@@ -37,7 +44,7 @@ curl http://localhost/api/health/authority-andorra
 curl http://localhost/api/health/data-andorra
 ```
 
-**Pass:** all return `{"status":"ok",...}`. Validation services also include `"redis": true`.
+**Pass:** all return `{"status":"ok",...}`. Booking-service health also reports `kafka`, `journey_management`, and `outbox_depth`. Journey-management health reports `leader` status. Validation services include `"redis": true` and `"data_service": true`.
 
 ---
 
@@ -135,13 +142,18 @@ docker exec -it mongo mongosh traffic --eval \
 
 **Pass:** `"status": "COMMITTED"`, both `laos` and `cambodia` in `regional_outcomes` with `"outcome": "APPROVED"`.
 
-Check final booking written to **Laos** regional MongoDB (origin region):
+Check final booking written to **both** involved regional MongoDB instances:
 ```bash
+# Laos record — includes Cambodia segments
 docker exec -it mongo-laos mongosh traffic --eval \
+  "db.bookings.findOne({vehicle_id:'veh-002'},{_id:0})"
+
+# Cambodia record — includes Cambodia segments
+docker exec -it mongo-cambodia mongosh traffic --eval \
   "db.bookings.findOne({vehicle_id:'veh-002'},{_id:0})"
 ```
 
-**Pass:** booking present with `"regions_involved": ["laos", "cambodia"]` and `"status": "approved"`.
+**Pass:** booking present in **both** mongo-laos and mongo-cambodia with `"regions_involved": ["laos", "cambodia"]` and `"status": "approved"`. Each record contains only the segments for that region.
 
 ---
 
@@ -202,7 +214,7 @@ curl -s http://localhost/api/authority/andorra/audit \
 - Cambodia authority returns `"count": 0` (booking not in cambodia MongoDB)
 - Andorra audit returns `0`
 
-For the cross-region booking (veh-002, test 4): the final booking is stored in the **laos** MongoDB (origin region), so:
+For the cross-region booking (veh-002, test 4): the booking is written to **all involved regions** at saga commit, so both authorities can see it:
 ```bash
 curl -s http://localhost/api/authority/laos/bookings/veh-002 \
   -H "Authorization: Bearer $AUTH_TOKEN" | jq
@@ -211,7 +223,7 @@ curl -s http://localhost/api/authority/cambodia/bookings/veh-002 \
   -H "Authorization: Bearer $AUTH_TOKEN" | jq
 ```
 
-**Pass:** laos returns it (it was written there as origin region), cambodia returns `"count": 0`.
+**Pass:** both laos and cambodia return the booking with `"status": "approved"` and `"regions_involved": ["laos", "cambodia"]`.
 
 ---
 
@@ -285,9 +297,9 @@ docker exec redis-laos redis-cli KEYS "capacity:segment:*" | wc -l
 
 ---
 
-## 9. Journey-Management Crash (Known Limitation Demo)
+## 9. Journey-Management Crash — Leader Election Recovery
 
-Demonstrates the known gap: no saga timeout watchdog. Cross-region sagas hang if the coordinator crashes mid-flight.
+Demonstrates leader election: when one instance crashes, the standby takes over the saga coordinator role within 30 seconds.
 
 ```bash
 # Register a fresh vehicle
@@ -299,29 +311,35 @@ TOKEN3=$(curl -s -X POST http://localhost/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"sagadriver","password":"pass123"}' | jq -r '.access_token')
 
-# Send booking then immediately kill journey-management
+# Check which instance is currently the leader
+curl http://localhost/api/health/journey-1 | jq '.leader'
+curl http://localhost/api/health/journey-2 | jq '.leader'
+
+# Kill the leader instance
+docker stop journey-management-1
+
+# Within 30s the standby wins the Redis SET NX election
+sleep 35
+curl http://localhost/api/health/journey-2 | jq '.leader'
+docker compose logs --tail=10 journey-management-2 | grep -i leader
+
+# New bookings are handled by the surviving instance
 curl -s -X POST http://localhost/api/bookings \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN3" \
   -d '{
-    "origin": "Pakse, Laos",
-    "destination": "Siem Reap, Cambodia",
+    "origin": "laos-pakse",
+    "destination": "khm-phnom-penh",
     "vehicle_id": "veh-saga",
     "driver_id": "sagadriver",
     "departure_time": "2026-04-10T09:00:00"
-  }' &
-docker stop journey-management
+  }' | jq
 
-# Saga stuck in PENDING (stored in global mongo)
-sleep 5
-docker exec -it mongo mongosh traffic --eval \
-  "db.sagas.find({status:'PENDING'},{saga_id:1,status:1,_id:0}).toArray()"
-
-# Restart
-docker start journey-management
+# Restart the crashed instance (becomes standby)
+docker start journey-management-1
 ```
 
-**Expected:** saga stays `PENDING` even after recovery — journey-management does not resume in-flight sagas on restart. Known limitation (no saga timeout/watchdog).
+**Expected:** journey-management-2 reports `"leader": true` after ~30s. Cross-region bookings submitted during the outage complete normally once the new leader starts consuming from Kafka (Kafka retains uncommitted messages). Known limitation: in-flight sagas at the moment of crash stay `PENDING` — no saga timeout/watchdog to recover them.
 
 ---
 

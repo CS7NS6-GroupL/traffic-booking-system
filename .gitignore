@@ -52,3 +52,5 @@ coverage.xml
 CLAUDE.md
 services/route-service/pbfs/
 *.osm.pbf
+/.claude
+crystalline-plotting-brooks.md

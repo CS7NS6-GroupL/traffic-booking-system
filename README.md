@@ -10,8 +10,8 @@ A globally-distributed microservices system allowing drivers to pre-book road jo
 |---|---|---|
 | Dylan Murray | 20331999 | booking-service, NGINX config |
 | Raghav Gupta | 25360079 | validation-service |
-| Kartik Singhal | 25369980 | route-service |
-| Dylan Thompson | 20314016 | journey-management, authority-service |
+| Kartik Singhal | 25369980 | route-service, journey-management |
+| Dylan Thompson | 20314016 | authority-service |
 | Niket Ghai | 25361669 | notification-service, user-registry |
 | Stevin Joseph Sebastian | 25377614 | data-gateway, all infrastructure |
 
@@ -20,37 +20,45 @@ A globally-distributed microservices system allowing drivers to pre-book road jo
 ## Architecture Overview
 
 ```
-                        AWS Route 53 (Geo-routing DNS)
+                        NGINX (port 80)
                                │
           ┌────────────────────┼────────────────────┐
           ▼                    ▼                     ▼
-   EU Cluster (K8s)     US Cluster (K8s)      Asia Cluster (K8s)
-   ─────────────────    ─────────────────     ─────────────────
-   NGINX Gateway        NGINX Gateway         NGINX Gateway
-   booking-service      booking-service       booking-service
-   validation-service   validation-service    validation-service
-   route-service        route-service         route-service
-   notification-svc     notification-svc      notification-svc
-   Redis 7              Redis 7               Redis 7
-   Apache Kafka         Apache Kafka          Apache Kafka
+   Laos Cluster          Cambodia Cluster      Andorra Cluster
+   ──────────────────    ─────────────────     ─────────────────
+   validation-svc-1/2   validation-svc-1/2    validation-svc-1/2
+   route-service        route-service          route-service
+   data-service-1/2     data-service-1/2       data-service-1/2
+   authority-service    authority-service      authority-service
+   redis-laos           redis-cambodia         redis-andorra
+   mongo-laos           mongo-cambodia         mongo-andorra
           │                    │                     │
           └────────────────────┼─────────────────────┘
                                ▼
-                    MongoDB Atlas (Global)
-                    user-registry (Global)
-                    data-gateway (Cross-region router)
-                    journey-management
-                    authority-service
+              Global shared infrastructure (Docker Compose demo):
+              booking-service-1/2    (behind nginx upstream)
+              journey-management-1/2 (leader election — one runs saga coordinator)
+              notification-service-1/2 (Redis pub/sub fanout for WebSocket)
+              user-registry
+              data-service (global — sagas, audit, flags)
+              Apache Kafka (shared)
+              mongo (global)
 ```
 
-**3 regional Kubernetes clusters** (EU, US, Asia), each self-contained with its own Kafka broker and Redis cache. **MongoDB Atlas** provides globally-replicated persistent storage. **AWS Route 53** geo-routes drivers to the nearest cluster. **Data Gateway** routes cross-region data requests with automatic Atlas fallback on regional failure.
+**3 regional clusters** (Laos, Cambodia, Andorra), each with its own Redis and MongoDB. **A single nginx** load-balances across multi-instance services. **Redis leader election** ensures only one journey-management instance runs the saga coordinator consumer. **Redis pub/sub** fans out WebSocket notifications to all notification-service instances.
 
 ### Booking Flow
 ```
-Driver → Route 53 → NGINX → booking-service (JWT check) → Kafka
-  → validation-service (Redis lock + capacity check + MongoDB dedup)
-  → booking-outcomes Kafka topic
-  → notification-service → WebSocket push to driver
+Driver → NGINX → booking-service (JWT check) → journey-management /plan
+  → single-region: Kafka booking-requests
+    → validation-service (Redis lock + capacity check + MongoDB dedup)
+    → booking-outcomes Kafka topic
+    → notification-service → Redis pub/sub → WebSocket push to driver
+
+  → cross-region: journey-management /sagas (saga coordinator)
+    → sub-bookings per region → validation-services
+    → saga coordinator collects outcomes → commit to ALL involved regions
+    → booking-outcomes → notification-service → WebSocket push
 ```
 
 ---
@@ -59,7 +67,7 @@ Driver → Route 53 → NGINX → booking-service (JWT check) → Kafka
 
 ### Prerequisites
 - Docker + Docker Compose v2
-- (Optional) `kubectl` + Minikube for K8s demo
+- Python 3.10+ (for load test script)
 
 ### Run locally with Docker Compose
 
@@ -67,47 +75,67 @@ Driver → Route 53 → NGINX → booking-service (JWT check) → Kafka
 git clone <repo-url>
 cd traffic-booking-system
 
-cp .env.example .env
-# Edit .env — at minimum set JWT_SECRET to a long random string
+docker compose up --build -d
+```
 
-docker-compose up --build
+Services run as **2 instances** each behind nginx upstreams. All instances share Kafka and their regional Redis/MongoDB.
+
+### Import custom road graph (required for routing)
+
+```bash
+# Import the custom 3-region test graph (Laos, Cambodia, Andorra)
+python services/route-service/import_custom_graph.py
+
+# Restart route and validation services to load the new graph
+docker restart route-service-laos route-service-cambodia route-service-andorra
+docker restart validation-service-laos validation-service-cambodia validation-service-andorra
 ```
 
 ### Health Check URLs
 
+Services expose health via nginx. Multi-instance services have per-instance paths.
+
 | Service | URL |
 |---|---|
-| booking-service | http://localhost:8001/health |
-| user-registry | http://localhost:8002/health |
-| authority-service | http://localhost:8003/health |
-| data-gateway | http://localhost:8004/health |
-| validation-service | http://localhost:8005/health |
-| route-service | http://localhost:8006/health |
-| notification-service | http://localhost:8007/health |
-| journey-management | http://localhost:8008/health |
+| booking-service | http://localhost/api/health/booking |
+| booking-service (per-instance) | http://localhost/api/health/booking-1, /booking-2 |
+| user-registry | http://localhost/api/health/user |
+| authority-service | http://localhost/api/health/authority-laos |
+| data-service (global) | http://localhost/api/health/data |
+| validation-service | http://localhost/api/health/validation-laos |
+| route-service | http://localhost/api/health/route-laos |
+| notification-service | http://localhost/api/health/notification |
+| journey-management | http://localhost/api/health/journey |
+| journey-management (per-instance) | http://localhost/api/health/journey-1, /journey-2 |
 
-All return: `{"status": "ok", "service": "<name>", "region": "local"}`
+Replace `-laos` with `-cambodia` or `-andorra` for the other regions.
 
 ### Quick smoke test
 ```bash
 # Register a driver
-curl -X POST http://localhost:8002/auth/register \
+curl -X POST http://localhost/api/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"secret","vehicle_id":"veh-001","role":"DRIVER"}'
+  -d '{"username":"alice","password":"password123","vehicle_id":"veh-001","role":"DRIVER"}'
 
 # Login and get token
-TOKEN=$(curl -s -X POST http://localhost:8002/auth/login \
+TOKEN=$(curl -s -X POST http://localhost/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"secret"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+  -d '{"username":"alice","password":"password123"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
-# Submit a booking
-curl -X POST http://localhost:8001/bookings \
+# Submit a single-region booking (Laos)
+curl -X POST http://localhost/api/bookings \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"driver_id":"alice","vehicle_id":"veh-001","origin":"A","destination":"D","departure_time":"2026-04-01T09:00:00Z"}'
+  -d '{"driver_id":"alice","vehicle_id":"veh-001","origin":"laos-vientiane","destination":"laos-savannakhet","departure_time":"2026-04-10T09:00:00Z"}'
+
+# Submit a cross-region booking (Laos → Cambodia)
+curl -X POST http://localhost/api/bookings \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"driver_id":"alice","vehicle_id":"veh-001","origin":"laos-pakse","destination":"khm-phnom-penh","departure_time":"2026-04-10T09:00:00Z"}'
 
 # Check a route
-curl "http://localhost:8006/routes?origin=A&destination=D"
+curl "http://localhost/api/routes/laos?origin=laos-vientiane&destination=laos-savannakhet"
 ```
 
 ---
@@ -121,17 +149,15 @@ K8s manifests are under [infra/k8s/](infra/k8s/) with subdirectories for each re
 # Start minikube
 minikube start --nodes=3
 
-# Create namespaces
-kubectl create namespace eu
-kubectl create namespace us
-kubectl create namespace asia
+# Create namespaces (matching region names)
+kubectl create namespace laos
+kubectl create namespace cambodia
+kubectl create namespace andorra
 
-# Apply EU cluster manifests
-kubectl apply -f infra/k8s/eu/
-
-# Apply US and Asia
-kubectl apply -f infra/k8s/us/
-kubectl apply -f infra/k8s/asia/
+# Apply regional manifests
+kubectl apply -f infra/k8s/laos/
+kubectl apply -f infra/k8s/cambodia/
+kubectl apply -f infra/k8s/andorra/
 ```
 
 Each service runs with **2 replicas**, a liveness probe on `/health`, and environment from the regional ConfigMap.
@@ -144,9 +170,9 @@ Scripts are in [scripts/](scripts/). Make executable first: `chmod +x scripts/*.
 
 | Script | What it demonstrates |
 |---|---|
-| `scripts/demo_pod_crash.sh` | Delete booking-service pod → K8s restarts it, Kafka retains unacked message |
-| `scripts/demo_kafka_failure.sh` | Delete kafka-0 → consumers reconnect after broker recovery |
-| `scripts/demo_region_partition.sh` | Cordon EU nodes → Route 53 stops routing to EU, Data Gateway falls back to Atlas |
+| `scripts/demo_pod_crash.sh` | Kill booking-service-1 → nginx routes to booking-service-2, Kafka retains unacked messages; instance recovers and rejoins |
+| `scripts/demo_kafka_failure.sh` | Stop kafka → booking-service outbox buffers messages, retries every 5s; broker recovers, buffered messages drain |
+| `scripts/demo_region_partition.sh` | Stop validation-service-laos → cross-region sagas involving laos time out; single-region laos bookings fail; cambodia/andorra unaffected |
 
 ---
 
@@ -154,58 +180,57 @@ Scripts are in [scripts/](scripts/). Make executable first: `chmod +x scripts/*.
 
 | Component | Purpose | Port |
 |---|---|---|
-| Apache Kafka | Async message queue (booking-requests, booking-outcomes, capacity-releases, notifications) | 9092 |
-| Redis 7 | Per-cluster capacity cache + distributed locking | 6379 |
-| MongoDB | Persistent storage for bookings, users, road network | 27017 |
-| NGINX | Regional load balancer / API gateway | 80/443 |
+| Apache Kafka | Async message queue (booking-requests, booking-outcomes, capacity-releases) | 9092 |
+| Redis (per-region) | Capacity counters + distributed locking + leader election + pub/sub | 6379 |
+| MongoDB (per-region) | Persistent booking + OSM road graph storage | 27017–27022 |
+| NGINX | Load balancer / API gateway — upstreams for multi-instance services | 80 |
 
 ---
 
 ## Cross-Region Journey Consistency
 
-This is the central distributed systems challenge: a journey from Dublin (EU) to New York (US) requires capacity reservations on road segments owned by two independent regional clusters. We address this with a **two-layer routing architecture** plus the **Saga pattern**.
+This is the central distributed systems challenge: a journey from Pakse (Laos) to Phnom Penh (Cambodia) requires capacity reservations on road segments owned by two independent regional clusters. We address this with a **two-layer routing architecture** plus the **Saga pattern**.
 
 ### Layer 1 — Region overlay graph (in journey-management)
 
-Each regional `route-service` is autonomous and only knows its own roads. No service assembles a global road graph. Instead, `journey-management` (the Journey Orchestrator) holds a small **region-level overlay graph**:
+Each regional `route-service` is autonomous and only knows its own roads. `journey-management` holds a small **region-level overlay graph**:
 
 ```
-Overlay nodes:  eu,  us,  asia
-Overlay edges:  eu ──EU_US_GW── us ──US_ASIA_GW── asia
-```
+Overlay nodes:   laos,  cambodia,  andorra
+Land corridors:  laos ──[Voen Kham/Don Kralor border]── cambodia
 
-This mirrors the hierarchical overlay routing technique — coarse at the region level, detailed within each region.
+andorra: isolated (no land connection to laos or cambodia)
+```
 
 ### Layer 2 — Regional road graphs (in route-service)
 
 Each cluster holds only its own roads, including the shared gateway node at its border:
 
 ```
-EU:  A ─ B ─ C ─ D ─── EU_US_GW
-                              │
-US:               EU_US_GW ─ X ─ Y ─ Z ─── US_ASIA_GW
-                                                  │
-Asia:                         US_ASIA_GW ─ P ─ Q ─ R
+Laos:     vientiane ─ pakse ─── GATEWAY_LAOS_EXIT
+                                       │
+Cambodia:              GATEWAY_CAMBODIA_ENTRY ─── phnom-penh ─ siem-reap
+
+Andorra:  andorra-la-vella ─ la-massana ─ arinsal   (isolated)
 ```
 
 ### How a cross-region route is planned (POST /plan)
 
 ```
-booking-service  →  POST journey-management/plan { origin: "A", destination: "Z" }
+booking-service  →  POST journey-management/plan { origin: "laos-pakse", destination: "khm-phnom-penh" }
                                   │
-          1. NODE_REGION["A"] = "eu", NODE_REGION["Z"] = "us"
-          2. Dijkstra on overlay  →  region sequence ["eu", "us"]
-          3. Call EU route-service: GET /routes?origin=A&destination=EU_US_GW
-          4. Call US route-service: GET /routes?origin=EU_US_GW&destination=Z
-          5. Return combined segments_by_region + is_cross_region=true
+          1. NODE_ID_TO_REGION["laos-pakse"] = "laos"
+          2. NODE_ID_TO_REGION["khm-phnom-penh"] = "cambodia"
+          3. Dijkstra on overlay  →  region sequence ["laos", "cambodia"]
+          4. Call laos route-service: GET /routes?origin=laos-pakse&destination=GATEWAY_LAOS_EXIT
+          5. Call cambodia route-service: GET /routes?origin=GATEWAY_CAMBODIA_ENTRY&destination=khm-phnom-penh
+          6. Return combined segments_by_region + is_cross_region=true
 ```
-
-Each regional route-service is only ever asked about its own territory — consistent with the design principle that no service holds a monolithic global road graph.
 
 ### Saga coordinator (journey-management)
 
 ```
-booking-service  →  POST /sagas  →  journey-management
+booking-service  →  POST /sagas  →  journey-management (leader instance)
                                          │
                         publishes sub-booking to each region's
                         Kafka `booking-requests` (tagged target_region)
@@ -218,41 +243,65 @@ booking-service  →  POST /sagas  →  journey-management
                     ┌────────────────────┴────────────────────┐
                all APPROVED                             any REJECTED
                     │                                        │
-             write booking                    publish `capacity-releases`
-             to MongoDB                       to each already-APPROVED region
-                    │                         (compensating transactions)
-             publish APPROVED                        │
-             to booking-outcomes              publish REJECTED
-                    │                         to booking-outcomes
-                    └────────────┬────────────┘
+          write booking to ALL                  publish `capacity-releases`
+          involved regions' MongoDB             to each already-APPROVED region
+          (laos + cambodia)                     (compensating transactions)
+                    │                                        │
+             publish APPROVED                        publish REJECTED
+             to booking-outcomes                     to booking-outcomes
+                    │                                        │
+                    └────────────┬────────────────────────────┘
                                  │
-                      notification-service → WebSocket push to driver
+                      notification-service (any instance)
+                      receives via Redis pub/sub → WebSocket push
 ```
 
 ### Consistency model
 
 - **Within a region**: Redis distributed locks guarantee at-most-one reservation per segment (strong consistency).
-- **Across regions**: The saga provides **atomicity** at the application level — either all regions commit or all roll back. The consistency window (between sub-booking approval and saga commit) is bounded by Kafka consumer lag, typically < 1 second.
-- **On regional failure during saga**: If a region's validation-service is unavailable, that sub-booking times out as REJECTED, triggering compensations in the regions that had already approved. The driver is notified that the booking failed.
+- **Across regions**: The saga provides **atomicity** at the application level — either all regions commit or all roll back. The consistency window is bounded by Kafka consumer lag, typically < 1 second.
+- **On regional failure during saga**: If a region's validation-service is unavailable, that sub-booking times out as REJECTED, triggering compensations in already-approved regions.
+- **Multi-instance leader election**: Only one journey-management instance runs the saga coordinator Kafka consumer at a time (Redis `SET NX` with 30s TTL + renewal). The other instance runs as a hot standby and takes over within 30s on leader failure.
 
 ### Traffic Authority Interface
 
-The `authority-service` (port 8003) provides a read-only API for traffic enforcement. It accepts **only `AUTHORITY`-role JWTs** — driver tokens are rejected at the role-check level.
+The `authority-service` (per region) provides a read-only API for traffic enforcement. It accepts **only `AUTHORITY`-role JWTs**.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /authority/bookings/{vehicle_id}` | Confirm a vehicle has a valid booking for enforcement |
+| `GET /authority/bookings/{vehicle_id}` | Confirm a vehicle has a valid booking |
 | `GET /authority/audit` | Full audit log (most recent first) |
-| `POST /authority/flag/{booking_id}` | Flag a booking for review (written to separate `flags` collection) |
+| `POST /authority/flag/{booking_id}` | Flag a booking for review |
+
+For **cross-region bookings**, the final booking record is written to **all involved regions'** MongoDB instances, so the authority in each region can independently verify and flag the booking.
 
 ## Key Design Decisions
 
-- **Async validation via Kafka** — booking-service returns `202 Accepted` immediately; validation is decoupled and fault-tolerant.
-- **Redis distributed locks** — prevent overbooking when concurrent requests target the same road segment.
-- **Data partitioning** — road network data is stored on the cluster closest to where those roads are (EU roads on EU cluster, connected via gateway nodes).
-- **Saga pattern** — cross-region journeys use a saga coordinator in journey-management rather than a 2PC distributed transaction, trading isolation for availability.
-- **Compensating transactions** — both saga abort and journey cancellation publish `capacity-releases` events to decrement Redis counters in each involved region.
-- **AUTHORITY vs DRIVER tokens** — authority-service rejects DRIVER tokens at the JWT role level; no route can accidentally expose enforcement data to drivers.
+- **Async validation via Kafka** — booking-service returns `202 Accepted` immediately; validation is decoupled and fault-tolerant. An in-memory outbox retries Kafka failures every 5s.
+- **Kafka singleton producer** — one persistent connection shared across all threads (vs. per-call producer creation). Eliminates ~24s queueing latency under 1000-way concurrency. See `docs/performance.md`.
+- **Redis distributed locks** — prevent overbooking when concurrent requests target the same road segment. Safe Lua DECR ensures counters never go below zero on capacity release.
+- **Leader election** — journey-management uses Redis `SET NX` so only one instance runs the saga coordinator Kafka consumer. Hot standby takes over within 30s on failure.
+- **Redis pub/sub for notifications** — notification-service instances share a pub/sub channel; any instance can push to any driver regardless of which instance holds the WebSocket connection.
+- **Multi-instance deployment** — booking-service, journey-management, notification-service, and all data-services run as `-1`/`-2` pairs behind nginx upstreams with `proxy_next_upstream` failover.
+- **Saga pattern** — cross-region journeys use a saga coordinator rather than 2PC, trading isolation for availability.
+- **Cross-region booking storage** — at saga commit, the booking record is written to **every** involved region's MongoDB, so each regional authority has full visibility.
+- **Idempotency** — booking-service caches responses keyed on `X-Idempotency-Key` header (300s TTL); validation-service deduplicates by checking booking status before processing.
+- **AUTHORITY vs DRIVER tokens** — authority-service rejects DRIVER tokens at the JWT role level.
+
+---
+
+## Load Test Results
+
+See `docs/performance.md` for full results. Summary:
+
+| Test | Metric | Value |
+|---|---|---|
+| 1000 concurrent burst | p50 submission latency | 3,479 ms |
+| 1000 concurrent burst | Throughput | **53.4 req/s** |
+| Sustained 50 req/s × 60s | p50 submission | **81 ms** |
+| Cross-region saga e2e | Mean latency | **401 ms** |
+| 2000 req mega burst | Throughput | **86.5 req/s** |
+| Capacity enforcement | 50 concurrent, cap=1 | 1/50 approved — **PASS** |
 
 ---
 

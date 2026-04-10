@@ -25,7 +25,18 @@ Request for region X
 - **FastAPI** — async REST API
 - **httpx** — async HTTP client for cross-region forwarding
 - **MongoDB Atlas** (`pymongo`) — global fallback when a regional cluster is unreachable
-- **Environment vars** — `EU_DATA_URL`, `US_DATA_URL`, `ASIA_DATA_URL` configure peer gateways
+- **Environment vars** — `LAOS_DATA_URL`, `CAMBODIA_DATA_URL`, `ANDORRA_DATA_URL` configure peer gateways
 
 ## Failure Handling
 When the target regional cluster is unreachable (network partition, pod crash), the gateway automatically reads from the globally-replicated MongoDB Atlas instance, ensuring continued availability at the cost of slight consistency lag.
+
+## Environment Variables
+
+| Variable | Purpose |
+|---|---|
+| `REGION` | This instance's region (`laos`, `cambodia`, or `andorra`) |
+| `LAOS_DATA_URL` | URL of the Laos data-gateway |
+| `CAMBODIA_DATA_URL` | URL of the Cambodia data-gateway |
+| `ANDORRA_DATA_URL` | URL of the Andorra data-gateway |
+| `MONGO_URI` | Local MongoDB connection string |
+| `ATLAS_URI` | MongoDB Atlas URI (global fallback) |
