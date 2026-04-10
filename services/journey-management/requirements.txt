@@ -6,3 +6,5 @@ httpx
 pymongo
 kafka-python
 geopy
+tenacity
+redis

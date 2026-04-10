@@ -1,10 +1,16 @@
 import os
 import sys
+import logging
 import bcrypt
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from datetime import datetime
 from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
+
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+log = logging.getLogger("user-registry")
 
 sys.path.insert(0, "/app/shared")
 
@@ -19,6 +25,12 @@ JWT_ALGORITHM  = os.getenv("JWT_ALGORITHM", "HS256")
 # Shared connection pool — one client for the lifetime of the process
 _client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
 _db     = _client["traffic"]
+
+
+@app.on_event("startup")
+def create_indexes():
+    _db.users.create_index("username", unique=True)
+    log.info("user-registry: unique index on username ensured")
 
 
 class RegisterRequest(BaseModel):
@@ -42,8 +54,6 @@ def health():
 def register(req: RegisterRequest):
     """Register a new driver and vehicle. Password is bcrypt-hashed before storage."""
     try:
-        if _db.users.find_one({"username": req.username}):
-            raise HTTPException(status_code=409, detail="Username already exists")
         hashed = bcrypt.hashpw(req.password.encode(), bcrypt.gensalt()).decode()
         _db.users.insert_one({
             "username":   req.username,
@@ -52,10 +62,12 @@ def register(req: RegisterRequest):
             "role":       req.role,
             "created_at": datetime.utcnow().isoformat(),
         })
-    except HTTPException:
-        raise
+    except DuplicateKeyError:
+        log.warning("user.register duplicate username=%s", req.username)
+        raise HTTPException(status_code=409, detail="Username already taken")
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"MongoDB unavailable: {exc}")
+    log.info("user.register username=%s", req.username)
     return {"status": "registered", "username": req.username}
 
 
@@ -66,12 +78,14 @@ def login(req: LoginRequest):
     try:
         user = _db.users.find_one({"username": req.username})
         if not user or not bcrypt.checkpw(req.password.encode(), user["password"].encode()):
+            log.warning("user.login failed username=%s", req.username)
             raise HTTPException(status_code=401, detail="Invalid credentials")
         role = user.get("role", "DRIVER")
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"MongoDB unavailable: {exc}")
+    log.info("user.login username=%s", req.username)
 
     token = create_token(
         {"sub": req.username, "role": role, "vehicle_id": user.get("vehicle_id")},
