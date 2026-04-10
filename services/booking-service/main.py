@@ -3,8 +3,18 @@ import json
 import uuid
 import httpx
 import sys
+import logging
+import queue
+import threading
+import time
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+from datetime import datetime as dt
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+log = logging.getLogger("booking-service")
 
 sys.path.insert(0, "/app/shared")
 
@@ -15,6 +25,88 @@ REGION = os.getenv("REGION", "local")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 JOURNEY_MANAGEMENT_URL = os.getenv("JOURNEY_MANAGEMENT_URL", "http://journey-management:8000")
 
+# ── Kafka singleton producer ──────────────────────────────────────────────────
+_kafka_producer = None
+_kafka_lock = threading.Lock()
+
+def _get_producer():
+    global _kafka_producer
+    with _kafka_lock:
+        if _kafka_producer is None:
+            from kafka import KafkaProducer
+            _kafka_producer = KafkaProducer(
+                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                value_serializer=lambda v: json.dumps(v).encode(),
+                retries=3,
+                acks="all",
+            )
+            log.info("kafka.producer initialized")
+    return _kafka_producer
+
+# ── In-memory outbox ──────────────────────────────────────────────────────────
+_outbox: queue.Queue = queue.Queue()
+
+def _outbox_worker():
+    while True:
+        time.sleep(5)
+        batch = []
+        while not _outbox.empty():
+            batch.append(_outbox.get_nowait())
+        failed = []
+        for msg in batch:
+            try:
+                _get_producer().send("booking-requests", msg)
+                log.info("outbox.retry queued booking_id=%s", msg.get("booking_id"))
+            except Exception as exc:
+                log.warning("outbox.retry failed booking_id=%s: %s", msg.get("booking_id"), exc)
+                failed.append(msg)
+        if batch:
+            try:
+                _get_producer().flush()
+            except Exception as exc:
+                log.warning("outbox.flush failed: %s", exc)
+                failed.extend(m for m in batch if m not in failed)
+        for msg in failed:
+            _outbox.put(msg)
+
+def _publish_to_kafka(message: dict):
+    try:
+        _get_producer().send("booking-requests", message)
+        _get_producer().flush()
+    except Exception as exc:
+        log.warning("kafka.send failed booking_id=%s — queuing in outbox: %s",
+                    message.get("booking_id"), exc)
+        _outbox.put(message)
+
+# ── Idempotency cache ─────────────────────────────────────────────────────────
+_idem: dict = {}
+IDEM_TTL = 300
+
+def _check_idem(key: str):
+    if key in _idem:
+        r, ts = _idem[key]
+        if time.time() - ts < IDEM_TTL:
+            return r
+        del _idem[key]
+    return None
+
+def _store_idem(key: str, r):
+    _idem[key] = (r, time.time())
+
+# ── tenacity retry helpers for JM HTTP calls ──────────────────────────────────
+@retry(retry=retry_if_exception_type(httpx.TransportError),
+       stop=stop_after_attempt(3), wait=wait_exponential(min=0.5, max=4), reraise=True)
+async def _jm_request(client, method: str, url, **kw):
+    return await getattr(client, method)(url, **kw)
+
+
+async def _jm_post(client, url, **kw):
+    return await _jm_request(client, "post", url, **kw)
+
+
+async def _jm_get(client, url, **kw):
+    return await _jm_request(client, "get", url, **kw)
+
 
 class BookingRequest(BaseModel):
     driver_id: str
@@ -22,6 +114,22 @@ class BookingRequest(BaseModel):
     origin: str
     destination: str
     departure_time: str
+
+    @field_validator("driver_id", "vehicle_id", "origin", "destination")
+    @classmethod
+    def non_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+    @field_validator("departure_time")
+    @classmethod
+    def iso8601(cls, v):
+        try:
+            dt.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("must be ISO 8601 e.g. 2026-04-01T09:00")
+        return v
 
 
 def _decode_driver_token(authorization: str) -> dict:
@@ -37,23 +145,41 @@ def _decode_driver_token(authorization: str) -> dict:
     return payload
 
 
-def _publish_to_kafka(message: dict):
-    from kafka import KafkaProducer
-    producer = KafkaProducer(
-        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-    )
-    producer.send("booking-requests", message)
-    producer.flush()
+@app.on_event("startup")
+def _start_outbox():
+    threading.Thread(target=_outbox_worker, daemon=True).start()
+    log.info("booking-service started region=%s", REGION)
 
 
 @app.get("/health")
-def health():
-    return {"status": "ok", "service": SERVICE_NAME, "region": REGION}
+async def health():
+    checks = {}
+    try:
+        from kafka.admin import KafkaAdminClient
+        a = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, request_timeout_ms=3000)
+        a.list_topics()
+        a.close()
+        checks["kafka"] = "ok"
+    except Exception as e:
+        checks["kafka"] = f"error: {e}"
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as c:
+            r = await c.get(f"{JOURNEY_MANAGEMENT_URL}/health")
+            checks["journey_management"] = "ok" if r.status_code == 200 else f"http {r.status_code}"
+    except Exception as e:
+        checks["journey_management"] = f"error: {e}"
+    checks["outbox_queued"] = _outbox.qsize()
+    ok = all(v == "ok" for k, v in checks.items() if k != "outbox_queued")
+    return {"status": "ok" if ok else "degraded", "service": SERVICE_NAME,
+            "region": REGION, "checks": checks}
 
 
 @app.post("/bookings", status_code=202)
-async def create_booking(booking: BookingRequest, authorization: str = Header(...)):
+async def create_booking(
+    booking: BookingRequest,
+    authorization: str = Header(...),
+    x_idempotency_key: str = Header(None),
+):
     """
     Booking entry point:
     1. Validate JWT (DRIVER role required).
@@ -67,12 +193,18 @@ async def create_booking(booking: BookingRequest, authorization: str = Header(..
     """
     _decode_driver_token(authorization)
 
+    if x_idempotency_key:
+        cached = _check_idem(x_idempotency_key)
+        if cached is not None:
+            return cached
+
     booking_id = f"bk-{uuid.uuid4().hex[:12]}"
 
     # ── Step 3: resolve route via Journey Orchestrator ────────────────────────
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
+            resp = await _jm_post(
+                client,
                 f"{JOURNEY_MANAGEMENT_URL}/plan",
                 json={"origin": booking.origin, "destination": booking.destination},
             )
@@ -104,16 +236,16 @@ async def create_booking(booking: BookingRequest, authorization: str = Header(..
         # Use the journey's actual region (not this service's region) so the
         # correct regional validation-service picks up the message.
         journey_region = plan.get("regions_involved", [REGION])[0]
-        try:
-            _publish_to_kafka({**base_message, "target_region": journey_region})
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"Kafka unavailable: {exc}")
-        return {
+        _publish_to_kafka({**base_message, "target_region": journey_region})
+        result = {
             "status":     "accepted",
             "booking_id": booking_id,
             "flow":       "single-region",
             "region":     REGION,
         }
+        if x_idempotency_key:
+            _store_idem(x_idempotency_key, result)
+        return result
 
     # ── Step 4b: cross-region saga ────────────────────────────────────────────
     saga_payload = {
@@ -123,7 +255,8 @@ async def create_booking(booking: BookingRequest, authorization: str = Header(..
     }
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
+            resp = await _jm_post(
+                client,
                 f"{JOURNEY_MANAGEMENT_URL}/sagas",
                 json=saga_payload,
                 headers={"Authorization": authorization},
@@ -135,13 +268,16 @@ async def create_booking(booking: BookingRequest, authorization: str = Header(..
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Journey management unavailable: {exc}")
 
-    return {
+    result = {
         "status":           "accepted",
         "booking_id":       booking_id,
         "saga_id":          saga.get("saga_id"),
         "flow":             "cross-region-saga",
         "regions_involved": plan["regions_involved"],
     }
+    if x_idempotency_key:
+        _store_idem(x_idempotency_key, result)
+    return result
 
 
 @app.get("/bookings/{booking_id}")
@@ -149,7 +285,8 @@ async def get_booking_status(booking_id: str, authorization: str = Header(...)):
     """Proxy to journey-management for booking lifecycle queries."""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(
+            resp = await _jm_get(
+                client,
                 f"{JOURNEY_MANAGEMENT_URL}/journeys/{booking_id}",
                 headers={"Authorization": authorization},
             )
