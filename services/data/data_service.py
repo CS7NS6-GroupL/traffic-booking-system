@@ -8,7 +8,7 @@ import json
 from datetime import datetime, UTC
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+from pymongo.errors import ConnectionFailure, DuplicateKeyError, ServerSelectionTimeoutError
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -34,7 +34,12 @@ load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
-mongo_client = MongoClient(MONGO_URI)
+mongo_client = MongoClient(
+    MONGO_URI,
+    maxPoolSize=50,
+    minPoolSize=5,
+    serverSelectionTimeoutMS=5000,
+)
 db           = mongo_client["traffic"]
 
 
@@ -111,7 +116,12 @@ def flag_booking_record(booking_id: str, reason: str = ""):
 
 @_mongo_retry
 def create_saga(saga_doc: dict):
-    db.sagas.insert_one({**saga_doc, "_id": saga_doc["saga_id"]})
+    try:
+        db.sagas.insert_one({**saga_doc, "_id": saga_doc["saga_id"]})
+    except DuplicateKeyError:
+        log.warning("saga.create duplicate saga_id=%s — returning existing", saga_doc["saga_id"])
+        return db.sagas.find_one({"saga_id": saga_doc["saga_id"]})
+    return saga_doc
 
 
 @_mongo_retry
@@ -129,11 +139,18 @@ def update_saga_regional_outcome(saga_id: str, region: str, outcome: str, reason
 
 
 @_mongo_retry
-def update_saga_status(saga_id: str, status: str, extra: dict = None):
-    update = {"status": status}
-    if extra:
-        update.update(extra)
-    db.sagas.update_one({"saga_id": saga_id}, {"$set": update})
+def update_saga_status(saga_id: str, new_status: str, expected_status: str = None):
+    filter_ = {"saga_id": saga_id}
+    if expected_status:
+        filter_["status"] = expected_status
+    result = db.sagas.find_one_and_update(
+        filter_,
+        {"$set": {"status": new_status, "updated_at": now_utc_iso()}},
+        return_document=True,
+    )
+    if not result and expected_status:
+        raise ValueError(f"saga {saga_id} not in expected state {expected_status}")
+    return result
 
 
 # =============================================================================

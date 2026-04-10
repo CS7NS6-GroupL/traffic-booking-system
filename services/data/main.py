@@ -18,7 +18,15 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "data-service")
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": SERVICE_NAME, "region": REGION}
+    checks = {}
+    try:
+        ds.mongo_client.admin.command("ping", serverSelectionTimeoutMS=3000)
+        checks["mongo"] = "ok"
+    except Exception as e:
+        checks["mongo"] = f"error: {e}"
+    ok = all(v == "ok" for v in checks.values())
+    return {"status": "ok" if ok else "degraded", "service": SERVICE_NAME,
+            "region": REGION, "checks": checks}
 
 
 # =============================================================================
@@ -109,12 +117,11 @@ def update_saga_outcome(saga_id: str, body: OutcomeBody):
 
 class StatusBody(BaseModel):
     status: str
-    extra:  dict[str, Any] = {}
 
 
 @app.patch("/sagas/{saga_id}/status")
 def update_saga_status(saga_id: str, body: StatusBody):
-    ds.update_saga_status(saga_id, body.status, body.extra or None)
+    ds.update_saga_status(saga_id, body.status)
     return {"ok": True}
 
 
