@@ -23,39 +23,42 @@ curl.exe -s http://localhost/api/health/journey-2 | python -m json.tool
 # The commands below assume instance 1 is the leader; swap ports if instance 2 is.
 
 # 2. Inject a 30-second delay on the leader before the final saga commit
+#    8008 = journey-management-1 direct port
+#    8018 = journey-management-2 direct port
 curl.exe -s -X POST "http://localhost:8008/debug/delay?saga_commit_seconds=30"
-# (8008 = journey-management-1 direct port)
-# If instance 2 is the leader, use port 8018 instead.
+# If instance 2 is the leader instead, use:
+# curl.exe -s -X POST "http://localhost:8018/debug/delay?saga_commit_seconds=30"
 ```
 
 **Demo steps:**
 
 ```powershell
-# Step 1 — open a log tail in a second terminal
-docker logs -f traffic-booking-system-journey-management-1-1
+# Step 1 — tail the LEADER log (filtered) in terminal A
+docker logs -f traffic-booking-system-journey-management-1-1 2>&1 | Select-String "DEMO|saga\."
 
-# Step 2 — submit a cross-region booking (Window B, bob: Vientiane → Phnom Penh)
+# Step 2 — tail the STANDBY log (filtered) in terminal B
+docker logs -f traffic-booking-system-journey-management-2-1 2>&1 | Select-String "DEMO|leader|recovery|saga\.|joined group saga"
+
+# Step 3 — submit a cross-region booking (Window B, bob: Vientiane → Phnom Penh)
 # Do this in the browser.
 
-# Step 3 — watch the leader log print:
+# Step 4 — terminal A prints:
 #   [DEMO] saga_commit_delay: sleeping 30s before final commit/abort — kill the leader now
-# You have 30 seconds.
-
-# Step 4 — kill the leader
+# Kill the leader immediately:
 docker stop traffic-booking-system-journey-management-1-1
 
-# Step 5 — watch the standby (JM-2) log:
-docker logs -f traffic-booking-system-journey-management-2-1
-# You'll see:
-#   saga.recovery: found N stuck sagas
-#   saga.recovery: replaying PENDING saga <id>
-#   then the APPROVED outcome published
+# Step 5 — terminal B prints (in order):
+#   saga-coordinator: not leader, waiting 5s...   ← was already polling
+#   saga-coordinator: acquired leader lock         ← election won
+#   saga.recovery: found 1 stuck saga(s)           ← PENDING scan
+#   saga.recovery: PENDING saga ... replaying      ← recovery
+#   (booking written to Laos + Cambodia MongoDB)
+#   Successfully joined group saga-coordinator-group ← Kafka consumer live
 
 # Step 6 — booking completes in the browser (APPROVED notification)
 
 # Step 7 — confirm new leader
 curl.exe -s http://localhost/api/health/journey-2 | python -m json.tool
-# "is_leader": true
 
 # Step 8 — bring the crashed instance back as standby
 docker start traffic-booking-system-journey-management-1-1
@@ -93,22 +96,21 @@ curl.exe -s -X POST "http://localhost:8005/debug/delay?validation_seconds=20"
 **Demo steps:**
 
 ```powershell
-# Step 1 — open log tail for both laos validation instances
-docker logs -f traffic-booking-system-validation-service-laos-1-1
+# Step 1 — tail laos-1 (filtered) in terminal A
+docker logs -f traffic-booking-system-validation-service-laos-1-1 2>&1 | Select-String "DEMO|received from Kafka|APPROVED|REJECTED|locks released|dedup"
 
-# Step 2 — submit a single-region Laos booking (alice: Vientiane → Luang Prabang)
+# Step 2 — tail laos-2 (filtered) in terminal B
+docker logs -f traffic-booking-system-validation-service-laos-2-1 2>&1 | Select-String "DEMO|received from Kafka|APPROVED|REJECTED|locks released|dedup"
+
+# Step 3 — submit a single-region Laos booking (alice: Vientiane → Luang Prabang)
 # Do this in the browser.
 
-# Step 3 — watch laos-1 log print:
+# Step 4 — terminal A prints:
 #   [DEMO] validation_delay: locks held, capacity confirmed — sleeping 20s (kill me now)
-# You have 20 seconds.
-
-# Step 4 — kill laos-1
+# Kill laos-1 immediately:
 docker stop traffic-booking-system-validation-service-laos-1-1
 
-# Step 5 — Kafka re-delivers the message to laos-2. Watch laos-2 pick it up:
-docker logs -f traffic-booking-system-validation-service-laos-2-1
-# You'll see:
+# Step 5 — terminal B prints (Kafka re-delivery to laos-2):
 #   received from Kafka: booking <id>
 #   Redis locks released, counters incremented
 #   booking <id> → APPROVED
@@ -144,18 +146,24 @@ See `DEMO_SCRIPT.md` Step 7. No delay injection needed — the window is the 30-
 watchdog poll interval, which is long enough to demonstrate naturally.
 
 ```powershell
-# Open watchdog log
-docker logs -f traffic-booking-system-validation-service-andorra-1-1
+# Open watchdog log (filtered) in a second terminal
+docker logs -f traffic-booking-system-validation-service-andorra-1-1 2>&1 | Select-String "unreachable|back up|probe key|rebuild|Seeded|REJECTED"
 
 # Crash Redis
 docker stop redis-andorra
 
-# (try a booking — REJECTED)
+# Terminal prints:
+#   Redis unreachable for 'andorra' — bookings will be rejected until Redis recovers
+
+# (try a booking in the browser — REJECTED)
 
 # Bring Redis back + force probe key deletion so watchdog triggers rebuild
 docker start redis-andorra; docker exec redis-andorra redis-cli DEL watchdog:probe:andorra
 
-# Within 30s: "Redis back up for 'andorra' — probe key missing, running full rebuild"
+# Terminal prints within 30s:
+#   Redis back up for 'andorra' — probe key missing, running full rebuild
+#   Seeded N Redis segment keys...
+#   rebuild complete
 ```
 
 ---

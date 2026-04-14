@@ -43,28 +43,11 @@ log = logging.getLogger("journey-management")
 sys.path.insert(0, "/app/shared")
 
 # ---------------------------------------------------------------------------
-# Demo / fault-injection delays — toggled at runtime via POST /debug/delay
+# Demo / fault-injection delay state (module-level, toggled via HTTP endpoint)
 # ---------------------------------------------------------------------------
 _demo_delay: dict = {
-    "saga_commit_seconds": 0,   # sleep inside _advance_saga just before the final commit/abort publish
-    "validation_publish_seconds": 0,  # unused here; mirrored in validation-service
+    "saga_commit_seconds": 0,   # sleep inside _advance_saga before the final commit/abort publish
 }
-
-@app.post("/debug/delay")
-def set_demo_delay(saga_commit_seconds: int = 0):
-    """
-    Inject a sleep into the saga coordinator just before it publishes the final
-    APPROVED/REJECTED outcome.  Use this to create a window wide enough to kill
-    the leader container and observe standby election + saga recovery.
-
-    Example:
-        curl -s -X POST "http://localhost:8008/debug/delay?saga_commit_seconds=30"
-    Reset:
-        curl -s -X POST "http://localhost:8008/debug/delay?saga_commit_seconds=0"
-    """
-    _demo_delay["saga_commit_seconds"] = saga_commit_seconds
-    log.warning("[DEMO] saga_commit_delay set to %ds", saga_commit_seconds)
-    return _demo_delay
 
 _geocoder = Nominatim(user_agent="journey-management-tcd")
 
@@ -108,6 +91,22 @@ NODE_ID_TO_REGION: dict[str, str] = {
 }
 
 app = FastAPI(title="Journey Management Service")
+
+
+@app.post("/debug/delay")
+def set_demo_delay(saga_commit_seconds: int = 0):
+    """
+    Inject a sleep into the saga coordinator just before it publishes the final
+    APPROVED/REJECTED outcome.  Creates a window wide enough to kill the leader
+    and observe standby election + saga recovery.
+
+    Set:   curl -s -X POST "http://localhost:8008/debug/delay?saga_commit_seconds=30"
+    Reset: curl -s -X POST "http://localhost:8008/debug/delay?saga_commit_seconds=0"
+    """
+    _demo_delay["saga_commit_seconds"] = saga_commit_seconds
+    log.warning("[DEMO] saga_commit_delay set to %ds", saga_commit_seconds)
+    return _demo_delay
+
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "journey-management")
 REGION = os.getenv("REGION", "local")

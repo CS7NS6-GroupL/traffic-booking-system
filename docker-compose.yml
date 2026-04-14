@@ -657,6 +657,8 @@ services:
       context: .
       dockerfile: services/journey-management/Dockerfile
     restart: unless-stopped
+    ports:
+      - "8018:8000"
     env_file:
       - services/journey-management/.env
     environment:
