@@ -218,8 +218,14 @@ JOURNEY-MANAGEMENT  _advance_saga():
     2. PATCH → data-service /sagas/{id}/status → "ABORTING"
     3. For each APPROVED region → produce to "capacity-releases":
          {target_region:"laos", booking_id, saga_id, segments:[...laos segs...]}
-    4. PATCH → data-service /sagas/{id}/status → "ABORTED"
-    5. Produce to "booking-outcomes" (FINAL):
+    4. For EACH region in regions_involved → write rejected booking record:
+         HTTP POST → data-service-{region}:8009/bookings
+           {booking_id, saga_id, status:"rejected", reject_reason, region, ...}
+         → written to mongo-laos (laos record)
+         → written to mongo-cambodia (cambodia record)
+         (authority audit log shows the attempt in every region involved)
+    5. PATCH → data-service /sagas/{id}/status → "ABORTED"
+    6. Produce to "booking-outcomes" (FINAL):
          {outcome:"REJECTED", reason:"One or more regions rejected..."}
     ▼
 VALIDATION-SERVICE-LAOS  (capacity-releases consumer)
