@@ -239,7 +239,12 @@ def _validate_and_publish(message: dict, producer):
     origin      = segments[0]["from"] if segments else message.get("origin")
     destination = segments[-1]["to"]  if segments else message.get("destination")
 
-    existing = ds.get_booking_by_id(booking_id)
+    try:
+        existing = ds.get_booking_by_id(booking_id)
+    except Exception as exc:
+        log.warning("[%s] dedup check unavailable for booking_id=%s — treating as new: %s",
+                    REGION, booking_id, exc)
+        existing = None
     if existing and existing.get("status") in ("approved", "rejected", "pending"):
         log.warning("[%s] dedup.skip booking_id=%s already processed status=%s",
                     REGION, booking_id, existing.get("status"))
@@ -403,14 +408,13 @@ def _seed_redis_capacity():
 
 def _redis_watchdog():
     """
-    Polls Redis every 30s. If it detects an empty store (capacity keys gone —
-    e.g. after a Redis crash and restart), re-seeds from MongoDB automatically.
-    Uses a probe key written at startup; if that key disappears, Redis was wiped.
+    Polls Redis every 30s. If the probe key has disappeared (Redis was wiped),
+    runs a full rebuild via rebuild_redis.main() — restores both capacity limits
+    and current occupancy counters from MongoDB, then resets the probe key.
     """
     PROBE_KEY    = f"watchdog:probe:{REGION}"
     POLL_SECONDS = 30
 
-    # Write the probe key — if Redis is up this always succeeds
     try:
         _redis.set(PROBE_KEY, "1")
     except Exception:
@@ -420,8 +424,12 @@ def _redis_watchdog():
         time.sleep(POLL_SECONDS)
         try:
             if not _redis.exists(PROBE_KEY):
-                log.warning("[validation-service] Redis probe key missing for '%s' — re-seeding capacity", REGION)
-                _seed_redis_capacity()
+                log.warning(
+                    "[validation-service] Redis probe key missing for '%s' — "
+                    "running full rebuild (capacity + occupancy)", REGION
+                )
+                import rebuild_redis
+                rebuild_redis.main()
                 _redis.set(PROBE_KEY, "1")
         except Exception as exc:
             log.error("[validation-service] Redis watchdog error: %s", exc)

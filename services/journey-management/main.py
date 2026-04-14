@@ -196,13 +196,113 @@ def _leader_renewal_loop():
         except Exception as exc:
             log.warning("leader.renewal error: %s", exc)
 
+def _recover_pending_sagas():
+    """
+    Scan MongoDB for sagas left in PENDING or ABORTING state by a previous
+    leader and attempt recovery. Called once immediately after leader election,
+    before the Kafka consumer starts.
+
+    Recovery cases:
+
+    PENDING — all regions already responded (outcomes are in MongoDB):
+        The previous leader collected every regional outcome and wrote it to
+        MongoDB but crashed before publishing the final commit/abort to Kafka.
+        Re-run _advance_saga for the last responding region; it will detect
+        that all outcomes are present and trigger the commit or abort.
+
+    PENDING — not all regions responded yet:
+        The Kafka consumer group will replay unacknowledged outcome messages
+        once this instance's consumer connects. No action needed here.
+
+    ABORTING:
+        The previous leader started rollback (wrote ABORTING) but crashed
+        before finishing. Re-send capacity-release messages for every approved
+        region, mark the saga ABORTED, and publish a REJECTED outcome so the
+        driver gets notified.
+    """
+    import sys; sys.path.insert(0, "/app/data")
+    import data_service as ds
+
+    try:
+        stuck = ds.get_sagas_by_status(["PENDING", "ABORTING"])
+    except Exception as exc:
+        log.error("saga.recovery: MongoDB query failed: %s", exc)
+        return
+
+    if not stuck:
+        log.info("saga.recovery: no stuck sagas found")
+        return
+
+    log.warning("saga.recovery: found %d stuck saga(s) — attempting recovery", len(stuck))
+
+    for saga in stuck:
+        saga_id          = saga.get("saga_id", "?")
+        status           = saga.get("status")
+        regions_involved = saga.get("regions_involved", [])
+        outcomes         = saga.get("regional_outcomes", {})
+
+        try:
+            if status == "ABORTING":
+                # Re-send capacity releases for every approved region then finalise.
+                producer = _kafka_producer()
+                for r, o in outcomes.items():
+                    if o.get("outcome") == "APPROVED":
+                        producer.send("capacity-releases", {
+                            "booking_id":    saga["booking_id"],
+                            "saga_id":       saga_id,
+                            "target_region": r,
+                            "driver_id":     saga["driver_id"],
+                            "vehicle_id":    saga["vehicle_id"],
+                            "segments":      saga.get("segments_by_region", {}).get(r, []),
+                        })
+                producer.flush()
+                ds.update_saga_status(saga_id, "ABORTED")
+                producer.send("booking-outcomes", {
+                    "booking_id":        saga["booking_id"],
+                    "saga_id":           saga_id,
+                    "driver_id":         saga["driver_id"],
+                    "outcome":           "REJECTED",
+                    "reason":            "Saga recovered from ABORTING state after coordinator restart",
+                    "regional_outcomes": outcomes,
+                })
+                producer.flush()
+                log.info("saga.recovery: ABORTING saga %s finalised as ABORTED", saga_id)
+
+            elif status == "PENDING":
+                all_responded = all(r in outcomes for r in regions_involved)
+                if all_responded:
+                    # All outcomes are in MongoDB — replay advance to commit or abort.
+                    last_region  = list(outcomes.keys())[-1]
+                    last_outcome = outcomes[last_region]
+                    log.info(
+                        "saga.recovery: PENDING saga %s has all %d outcomes — replaying advance",
+                        saga_id, len(outcomes),
+                    )
+                    _advance_saga(
+                        saga_id, last_region,
+                        last_outcome["outcome"],
+                        last_outcome.get("reason", ""),
+                    )
+                else:
+                    missing = [r for r in regions_involved if r not in outcomes]
+                    log.info(
+                        "saga.recovery: PENDING saga %s still waiting for %s — "
+                        "Kafka replay will deliver when consumer starts",
+                        saga_id, missing,
+                    )
+
+        except Exception as exc:
+            log.error("saga.recovery: failed for saga_id=%s: %s", saga_id, exc)
+
+
 def _saga_coordinator_loop():
     while not _is_leader():
         log.info("saga-coordinator: not leader, waiting 5s...")
         time.sleep(5)
     log.info("saga-coordinator: acquired leader lock node_id=%s", NODE_ID)
     threading.Thread(target=_leader_renewal_loop, daemon=True).start()
-    _saga_outcome_consumer()  # existing consumer function
+    _recover_pending_sagas()
+    _saga_outcome_consumer()
 
 
 # ── Regional data-service helpers (scatter-gather) ───────────────────────────

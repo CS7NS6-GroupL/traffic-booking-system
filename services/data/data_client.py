@@ -99,6 +99,12 @@ def get_saga(saga_id: str) -> dict | None:
     return r.json()
 
 
+def get_sagas_by_status(statuses: list[str]) -> list:
+    r = _client.get("/sagas", params={"status": ",".join(statuses)})
+    r.raise_for_status()
+    return r.json() or []
+
+
 def update_saga_regional_outcome(saga_id: str, region: str, outcome: str, reason: str) -> dict | None:
     return _patch(f"/sagas/{saga_id}/outcome", {"region": region, "outcome": outcome, "reason": reason})
 

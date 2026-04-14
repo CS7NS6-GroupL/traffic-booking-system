@@ -2,7 +2,24 @@
 Data Service — business logic layer.
 All Redis and MongoDB access lives here.
 Imported directly by main.py (the HTTP wrapper).
+
+Booking sharding
+----------------
+Booking documents are hash-sharded across up to two MongoDB instances:
+  shard 0 — MONGO_URI          (the existing regional MongoDB)
+  shard 1 — MONGO_SHARD_1_URI  (second MongoDB, same region)
+
+Shard routing: MD5(booking_id) % TOTAL_BOOKING_SHARDS
+MD5 is used instead of Python's built-in hash() because hash() is
+randomised per-process (PYTHONHASHSEED) and would route differently
+across the two data-service replicas.
+
+All non-booking collections (sagas, flags, audit_logs, osm_edges, …)
+remain on shard 0 (db).  If MONGO_SHARD_1_URI is not set, the service
+runs in single-shard mode and all booking writes go to db (no change
+from the pre-sharding behaviour).
 """
+import hashlib
 import os
 import json
 from datetime import datetime, UTC
@@ -32,7 +49,8 @@ _mongo_retry = retry(
 
 load_dotenv()
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_URI         = os.getenv("MONGO_URI",         "mongodb://localhost:27017")
+MONGO_SHARD_1_URI = os.getenv("MONGO_SHARD_1_URI", "")
 
 mongo_client = MongoClient(
     MONGO_URI,
@@ -40,7 +58,49 @@ mongo_client = MongoClient(
     minPoolSize=5,
     serverSelectionTimeoutMS=5000,
 )
-db           = mongo_client["traffic"]
+db = mongo_client["traffic"]
+
+# --- Shard 1 (optional) ---------------------------------------------------
+if MONGO_SHARD_1_URI:
+    _mongo_shard1_client = MongoClient(
+        MONGO_SHARD_1_URI,
+        maxPoolSize=50,
+        minPoolSize=5,
+        serverSelectionTimeoutMS=5000,
+    )
+    _shard1_db = _mongo_shard1_client["traffic"]
+    _booking_shards   = [db, _shard1_db]
+    _booking_clients  = [mongo_client, _mongo_shard1_client]
+    log.info("Booking sharding enabled: shard 0=%s  shard 1=%s", MONGO_URI, MONGO_SHARD_1_URI)
+else:
+    _shard1_db        = None
+    _booking_shards   = [db]
+    _booking_clients  = [mongo_client]
+
+TOTAL_BOOKING_SHARDS = len(_booking_shards)
+
+
+def _shard_db(booking_id: str):
+    """
+    Return the MongoDB database object for this booking_id.
+    Uses MD5 for a stable, process-independent hash.
+    """
+    if TOTAL_BOOKING_SHARDS == 1:
+        return db
+    idx = int(hashlib.md5(booking_id.encode()).hexdigest(), 16) % TOTAL_BOOKING_SHARDS
+    return _booking_shards[idx]
+
+
+def ping_all_shards() -> dict:
+    """Health check: ping every booking shard. Returns {shard_N: "ok"|"error: …"}."""
+    results = {}
+    for i, client in enumerate(_booking_clients):
+        try:
+            client.admin.command("ping")
+            results[f"shard_{i}"] = "ok"
+        except Exception as exc:
+            results[f"shard_{i}"] = f"error: {exc}"
+    return results
 
 
 def now_utc_iso() -> str:
@@ -53,11 +113,15 @@ def now_utc_iso() -> str:
 
 @_mongo_retry
 def get_vehicle_booking(vehicle_id: str):
-    booking = db.bookings.find_one(
-        {"vehicle_id": vehicle_id, "status": {"$in": ["approved", "pending"]}},
-        {"_id": 0},
-    )
-    return {"source": "mongodb", "booking": booking} if booking else None
+    """Fan-out to all shards — vehicle_id cannot be used as a shard key."""
+    for shard in _booking_shards:
+        booking = shard.bookings.find_one(
+            {"vehicle_id": vehicle_id, "status": {"$in": ["approved", "pending"]}},
+            {"_id": 0},
+        )
+        if booking:
+            return {"source": "mongodb", "booking": booking}
+    return None
 
 
 def get_vehicle_booking_fallback(vehicle_id: str):
@@ -71,32 +135,48 @@ def get_vehicle_booking_fallback(vehicle_id: str):
 
 @_mongo_retry
 def insert_booking(booking_doc: dict):
-    db.bookings.insert_one({k: v for k, v in booking_doc.items() if k != "_id"})
+    booking_id = booking_doc.get("booking_id", "")
+    _shard_db(booking_id).bookings.insert_one(
+        {k: v for k, v in booking_doc.items() if k != "_id"}
+    )
 
 
 @_mongo_retry
 def get_booking_by_id(booking_id: str) -> dict | None:
-    return db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
+    return _shard_db(booking_id).bookings.find_one({"booking_id": booking_id}, {"_id": 0})
 
 
 @_mongo_retry
 def get_bookings_by_vehicle(vehicle_id: str) -> list:
-    return list(db.bookings.find({"vehicle_id": vehicle_id}, {"_id": 0}))
+    """Fan-out to all shards."""
+    results = []
+    for shard in _booking_shards:
+        results.extend(shard.bookings.find({"vehicle_id": vehicle_id}, {"_id": 0}))
+    return results
 
 
 @_mongo_retry
 def get_bookings_by_driver(driver_id: str) -> list:
-    return list(db.bookings.find({"driver_id": driver_id}, {"_id": 0}))
+    """Fan-out to all shards."""
+    results = []
+    for shard in _booking_shards:
+        results.extend(shard.bookings.find({"driver_id": driver_id}, {"_id": 0}))
+    return results
 
 
 @_mongo_retry
 def get_all_bookings(limit: int = 50) -> list:
-    return list(db.bookings.find({}, {"_id": 0}).sort("created_at", -1).limit(limit))
+    """Fan-out to all shards, merge by created_at descending."""
+    results = []
+    for shard in _booking_shards:
+        results.extend(shard.bookings.find({}, {"_id": 0}).sort("created_at", -1).limit(limit))
+    results.sort(key=lambda b: b.get("created_at", ""), reverse=True)
+    return results[:limit]
 
 
 @_mongo_retry
 def cancel_booking_record(booking_id: str, cancelled_at: str):
-    db.bookings.update_one(
+    _shard_db(booking_id).bookings.update_one(
         {"booking_id": booking_id},
         {"$set": {"status": "cancelled", "cancelled_at": cancelled_at}},
     )
@@ -104,7 +184,7 @@ def cancel_booking_record(booking_id: str, cancelled_at: str):
 
 @_mongo_retry
 def flag_booking_record(booking_id: str, reason: str = ""):
-    db.bookings.update_one(
+    _shard_db(booking_id).bookings.update_one(
         {"booking_id": booking_id},
         {"$set": {"status": "flagged", "flagged_reason": reason, "flagged_at": now_utc_iso()}},
     )
@@ -136,6 +216,11 @@ def update_saga_regional_outcome(saga_id: str, region: str, outcome: str, reason
         {"$set": {f"regional_outcomes.{region}": {"outcome": outcome, "reason": reason}}},
     )
     return get_saga(saga_id)
+
+
+@_mongo_retry
+def get_sagas_by_status(statuses: list[str]) -> list:
+    return list(db.sagas.find({"status": {"$in": statuses}}, {"_id": 0}))
 
 
 @_mongo_retry

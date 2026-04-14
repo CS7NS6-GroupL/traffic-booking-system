@@ -74,7 +74,7 @@ POST /bookings
 - **Kafka singleton producer** — one persistent connection with `threading.Lock`. Eliminates per-call TCP overhead. See `docs/performance.md` for the 7× latency improvement this delivers.
 - **In-memory outbox** — failed Kafka publishes are queued; a background thread retries every 5s until the broker recovers.
 - **tenacity retry** — all HTTP calls to journey-management use 3-attempt exponential backoff (0.5s → 4s).
-- **Idempotency cache** — if the client retries with the same `X-Idempotency-Key`, the cached response is returned without re-submitting the booking.
+- **Idempotency cache (Redis-backed)** — if the client retries with the same `X-Idempotency-Key`, the cached response is returned without re-submitting the booking. Stored in `redis-laos` under `idem:{key}` with a 300s TTL so both instances share the same cache. Degrades gracefully to pass-through if Redis is unavailable.
 - **2 instances** — nginx routes to whichever instance is healthy; `proxy_next_upstream` retries on 502/503.
 
 ## Key Technologies
@@ -89,4 +89,5 @@ POST /bookings
 |---|---|
 | `JOURNEY_MANAGEMENT_URL` | URL of journey-management (route planning + saga) |
 | `KAFKA_BOOTSTRAP_SERVERS` | Kafka broker(s) |
+| `REDIS_URL` | Redis URL for shared idempotency cache (e.g. `redis://redis-laos:6379`) |
 | `JWT_SECRET` | Token signing key |

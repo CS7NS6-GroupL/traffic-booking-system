@@ -19,6 +19,9 @@ volumes:
   mongo-laos-data:
   mongo-cambodia-data:
   mongo-andorra-data:
+  mongo-laos-s1-data:
+  mongo-cambodia-s1-data:
+  mongo-andorra-s1-data:
   redis-laos-data:
   redis-cambodia-data:
   redis-andorra-data:
@@ -191,6 +194,53 @@ services:
       timeout: 10s
       retries: 5
 
+  # Booking shard-1 instances — second MongoDB per region for hash-sharded bookings.
+  # Shard 0 = mongo-{region} (existing).  Shard 1 = mongo-{region}-s1 (new).
+  # Route: MD5(booking_id) % 2 → data-service chooses which shard to read/write.
+  # osm_edges, osm_nodes, sagas, flags, audit_logs remain on shard 0 only.
+
+  mongo-laos-s1:
+    image: mongo:7
+    container_name: mongo-laos-s1
+    restart: unless-stopped
+    volumes:
+      - mongo-laos-s1-data:/data/db
+    networks:
+      - traffic-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  mongo-cambodia-s1:
+    image: mongo:7
+    container_name: mongo-cambodia-s1
+    restart: unless-stopped
+    volumes:
+      - mongo-cambodia-s1-data:/data/db
+    networks:
+      - traffic-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  mongo-andorra-s1:
+    image: mongo:7
+    container_name: mongo-andorra-s1
+    restart: unless-stopped
+    volumes:
+      - mongo-andorra-s1-data:/data/db
+    networks:
+      - traffic-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
   # ── Global services (not region-specific) ───────────────────────────────────
 
   user-registry:
@@ -230,8 +280,11 @@ services:
       SERVICE_NAME: data-service-laos
       REGION: laos
       MONGO_URI: mongodb://mongo-laos:27017
+      MONGO_SHARD_1_URI: mongodb://mongo-laos-s1:27017
     depends_on:
       mongo-laos:
+        condition: service_healthy
+      mongo-laos-s1:
         condition: service_healthy
     networks:
       traffic-net:
@@ -253,8 +306,11 @@ services:
       SERVICE_NAME: data-service-laos
       REGION: laos
       MONGO_URI: mongodb://mongo-laos:27017
+      MONGO_SHARD_1_URI: mongodb://mongo-laos-s1:27017
     depends_on:
       mongo-laos:
+        condition: service_healthy
+      mongo-laos-s1:
         condition: service_healthy
     networks:
       traffic-net:
@@ -278,8 +334,11 @@ services:
       SERVICE_NAME: data-service-cambodia
       REGION: cambodia
       MONGO_URI: mongodb://mongo-cambodia:27017
+      MONGO_SHARD_1_URI: mongodb://mongo-cambodia-s1:27017
     depends_on:
       mongo-cambodia:
+        condition: service_healthy
+      mongo-cambodia-s1:
         condition: service_healthy
     networks:
       traffic-net:
@@ -301,8 +360,11 @@ services:
       SERVICE_NAME: data-service-cambodia
       REGION: cambodia
       MONGO_URI: mongodb://mongo-cambodia:27017
+      MONGO_SHARD_1_URI: mongodb://mongo-cambodia-s1:27017
     depends_on:
       mongo-cambodia:
+        condition: service_healthy
+      mongo-cambodia-s1:
         condition: service_healthy
     networks:
       traffic-net:
@@ -326,8 +388,11 @@ services:
       SERVICE_NAME: data-service-andorra
       REGION: andorra
       MONGO_URI: mongodb://mongo-andorra:27017
+      MONGO_SHARD_1_URI: mongodb://mongo-andorra-s1:27017
     depends_on:
       mongo-andorra:
+        condition: service_healthy
+      mongo-andorra-s1:
         condition: service_healthy
     networks:
       traffic-net:
@@ -349,8 +414,11 @@ services:
       SERVICE_NAME: data-service-andorra
       REGION: andorra
       MONGO_URI: mongodb://mongo-andorra:27017
+      MONGO_SHARD_1_URI: mongodb://mongo-andorra-s1:27017
     depends_on:
       mongo-andorra:
+        condition: service_healthy
+      mongo-andorra-s1:
         condition: service_healthy
     networks:
       traffic-net:
@@ -651,9 +719,20 @@ services:
     environment:
       SERVICE_NAME: data-gateway
       REGION: laos
+      LAOS_DATA_URL: http://data-service-laos:8009
+      CAMBODIA_DATA_URL: http://data-service-cambodia:8009
+      ANDORRA_DATA_URL: http://data-service-andorra:8009
+      # Set MONGO_ATLAS_URI to your Atlas connection string to enable read
+      # fallback when a regional data-service is unreachable.
+      # Example: mongodb+srv://user:pass@cluster.mongodb.net/traffic?retryWrites=true
+      MONGO_ATLAS_URI: ""
     depends_on:
-      mongo:
-        condition: service_healthy
+      data-service-laos-1:
+        condition: service_started
+      data-service-cambodia-1:
+        condition: service_started
+      data-service-andorra-1:
+        condition: service_started
     networks:
       - traffic-net
     healthcheck:
@@ -678,12 +757,15 @@ services:
       SERVICE_NAME: booking-service
       REGION: laos
       JOURNEY_MANAGEMENT_URL: http://journey-management:8000
+      REDIS_URL: redis://redis-laos:6379
     depends_on:
       kafka:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
       mongo:
+        condition: service_healthy
+      redis-laos:
         condition: service_healthy
       journey-management-1:
         condition: service_healthy
@@ -709,12 +791,15 @@ services:
       SERVICE_NAME: booking-service
       REGION: laos
       JOURNEY_MANAGEMENT_URL: http://journey-management:8000
+      REDIS_URL: redis://redis-laos:6379
     depends_on:
       kafka:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
       mongo:
+        condition: service_healthy
+      redis-laos:
         condition: service_healthy
       journey-management-1:
         condition: service_healthy
@@ -769,6 +854,7 @@ services:
       REGION: laos
       REDIS_URL: redis://redis-laos:6379
       MONGO_URI: mongodb://mongo-laos:27017
+      MONGO_SHARD_1_URI: mongodb://mongo-laos-s1:27017
       DATA_SERVICE_URL: http://data-service-laos:8009
     depends_on:
       kafka:
@@ -778,6 +864,8 @@ services:
       redis-laos:
         condition: service_healthy
       mongo-laos:
+        condition: service_healthy
+      mongo-laos-s1:
         condition: service_healthy
       data-service-laos-1:
         condition: service_started
@@ -802,6 +890,7 @@ services:
       REGION: laos
       REDIS_URL: redis://redis-laos:6379
       MONGO_URI: mongodb://mongo-laos:27017
+      MONGO_SHARD_1_URI: mongodb://mongo-laos-s1:27017
       DATA_SERVICE_URL: http://data-service-laos:8009
     depends_on:
       kafka:
@@ -811,6 +900,8 @@ services:
       redis-laos:
         condition: service_healthy
       mongo-laos:
+        condition: service_healthy
+      mongo-laos-s1:
         condition: service_healthy
       data-service-laos-1:
         condition: service_started
@@ -865,6 +956,7 @@ services:
       REGION: cambodia
       REDIS_URL: redis://redis-cambodia:6379
       MONGO_URI: mongodb://mongo-cambodia:27017
+      MONGO_SHARD_1_URI: mongodb://mongo-cambodia-s1:27017
       DATA_SERVICE_URL: http://data-service-cambodia:8009
     depends_on:
       kafka:
@@ -874,6 +966,8 @@ services:
       redis-cambodia:
         condition: service_healthy
       mongo-cambodia:
+        condition: service_healthy
+      mongo-cambodia-s1:
         condition: service_healthy
       data-service-cambodia-1:
         condition: service_started
@@ -898,6 +992,7 @@ services:
       REGION: cambodia
       REDIS_URL: redis://redis-cambodia:6379
       MONGO_URI: mongodb://mongo-cambodia:27017
+      MONGO_SHARD_1_URI: mongodb://mongo-cambodia-s1:27017
       DATA_SERVICE_URL: http://data-service-cambodia:8009
     depends_on:
       kafka:
@@ -907,6 +1002,8 @@ services:
       redis-cambodia:
         condition: service_healthy
       mongo-cambodia:
+        condition: service_healthy
+      mongo-cambodia-s1:
         condition: service_healthy
       data-service-cambodia-1:
         condition: service_started
@@ -961,6 +1058,7 @@ services:
       REGION: andorra
       REDIS_URL: redis://redis-andorra:6379
       MONGO_URI: mongodb://mongo-andorra:27017
+      MONGO_SHARD_1_URI: mongodb://mongo-andorra-s1:27017
       DATA_SERVICE_URL: http://data-service-andorra:8009
     depends_on:
       kafka:
@@ -970,6 +1068,8 @@ services:
       redis-andorra:
         condition: service_healthy
       mongo-andorra:
+        condition: service_healthy
+      mongo-andorra-s1:
         condition: service_healthy
       data-service-andorra-1:
         condition: service_started
@@ -994,6 +1094,7 @@ services:
       REGION: andorra
       REDIS_URL: redis://redis-andorra:6379
       MONGO_URI: mongodb://mongo-andorra:27017
+      MONGO_SHARD_1_URI: mongodb://mongo-andorra-s1:27017
       DATA_SERVICE_URL: http://data-service-andorra:8009
     depends_on:
       kafka:
@@ -1003,6 +1104,8 @@ services:
       redis-andorra:
         condition: service_healthy
       mongo-andorra:
+        condition: service_healthy
+      mongo-andorra-s1:
         condition: service_healthy
       data-service-andorra-1:
         condition: service_started

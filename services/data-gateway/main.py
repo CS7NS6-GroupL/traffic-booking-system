@@ -1,93 +1,199 @@
+"""
+Data Gateway Service
+====================
+Transparent HTTP proxy to regional data-services.
+
+Request format:
+    ANY /data/{region}/{native_path}
+
+Is rewritten to:
+    ANY http://data-service-{region}:8009/{native_path}
+
+For example:
+    GET /data/laos/bookings/bk-abc123
+    → GET http://data-service-laos:8009/bookings/bk-abc123
+
+Atlas fallback (reads only):
+    If the regional data-service is unreachable, GET requests fall back to a
+    direct MongoDB Atlas query. This keeps read traffic flowing during a
+    regional outage. Write requests return 503 — writes require a live
+    regional data-service to maintain consistency.
+
+    Set MONGO_ATLAS_URI to your Atlas connection string to enable this.
+    If unset, the fallback is skipped and 503 is returned immediately.
+"""
+
 import os
+import re
+import logging
+
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from typing import Any
+from fastapi.responses import Response
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+log = logging.getLogger("data-gateway")
 
 app = FastAPI(title="Data Gateway Service")
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "data-gateway")
-REGION = os.getenv("REGION", "local")
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+REGION       = os.getenv("REGION",       "laos")
+MONGO_URI    = os.getenv("MONGO_URI",    "mongodb://mongo:27017")
 
-# Regional service base URLs (overridden via env in production)
-REGION_URLS = {
-    "andorra":  os.getenv("ANDORRA_DATA_URL",  "http://data-gateway-andorra:8000"),
-    "laos":     os.getenv("LAOS_DATA_URL",     "http://data-gateway-laos:8000"),
-    "cambodia": os.getenv("CAMBODIA_DATA_URL", "http://data-gateway-cambodia:8000"),
+# Atlas URI for read fallback. Set this to your MongoDB Atlas connection string.
+# If unset (or identical to MONGO_URI), Atlas fallback is effectively disabled.
+MONGO_ATLAS_URI = os.getenv("MONGO_ATLAS_URI", "")
+
+# Regional data-service base URLs.
+# Override via env in docker-compose for multi-machine deployments.
+REGION_URLS: dict[str, str] = {
+    "laos":     os.getenv("LAOS_DATA_URL",     "http://data-service-laos:8009"),
+    "cambodia": os.getenv("CAMBODIA_DATA_URL", "http://data-service-cambodia:8009"),
+    "andorra":  os.getenv("ANDORRA_DATA_URL",  "http://data-service-andorra:8009"),
 }
 
 
-def get_db(fallback: bool = False):
-    from pymongo import MongoClient
-    uri = os.getenv("MONGO_ATLAS_URI", MONGO_URI) if fallback else MONGO_URI
-    client = MongoClient(uri, serverSelectionTimeoutMS=3000)
-    return client["traffic"]
+# ---------------------------------------------------------------------------
+# Atlas fallback — direct MongoDB read when regional service is unreachable
+# ---------------------------------------------------------------------------
 
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": SERVICE_NAME, "region": REGION}
-
-
-@app.get("/data/{target_region}/{collection}/{doc_id}")
-async def read_document(target_region: str, collection: str, doc_id: str):
+def _atlas_fallback(region: str, native_path: str):
     """
-    Route read request to the appropriate regional cluster.
-    Falls back to MongoDB Atlas if the target region is unreachable.
+    Attempt a best-effort MongoDB Atlas read for the given path.
+    Supports the two most common read patterns:
+      /bookings/{booking_id}
+      /sagas/{saga_id}
+    Returns a FastAPI Response or raises HTTPException.
     """
-    if target_region == REGION:
-        return _local_read(collection, doc_id)
-
-    base = REGION_URLS.get(target_region)
-    if not base:
-        raise HTTPException(status_code=400, detail=f"Unknown region: {target_region}")
+    if not MONGO_ATLAS_URI:
+        log.warning("atlas.fallback: MONGO_ATLAS_URI not configured — returning 503")
+        raise HTTPException(
+            status_code=503,
+            detail="Regional data-service unreachable and no Atlas fallback configured",
+        )
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{base}/data/{target_region}/{collection}/{doc_id}")
-            resp.raise_for_status()
-            return resp.json()
-    except Exception:
-        # Regional cluster unreachable — fall back to MongoDB Atlas
-        return _local_read(collection, doc_id, fallback=True)
+        from pymongo import MongoClient
+        client = MongoClient(MONGO_ATLAS_URI, serverSelectionTimeoutMS=5000)
+        db = client["traffic"]
 
+        doc = None
 
-def _local_read(collection: str, doc_id: str, fallback: bool = False) -> Any:
-    try:
-        db = get_db(fallback=fallback)
-        doc = db[collection].find_one({"_id": doc_id}, {"_id": 0})
-        if not doc:
-            raise HTTPException(status_code=404, detail="Document not found")
-        return doc
+        # /bookings/{booking_id}
+        m = re.fullmatch(r"bookings/([^/]+)", native_path)
+        if m:
+            doc = db.bookings.find_one({"booking_id": m.group(1)}, {"_id": 0})
+
+        # /sagas/{saga_id}
+        m = re.fullmatch(r"sagas/([^/]+)", native_path)
+        if m:
+            doc = db.sagas.find_one({"saga_id": m.group(1)}, {"_id": 0})
+
+        # /bookings/driver/{driver_id}
+        m = re.fullmatch(r"bookings/driver/([^/]+)", native_path)
+        if m:
+            docs = list(db.bookings.find(
+                {"driver_id": m.group(1), "region": region}, {"_id": 0}
+            ))
+            client.close()
+            log.info("atlas.fallback: served %d bookings for driver from Atlas", len(docs))
+            import json
+            return Response(content=json.dumps(docs), media_type="application/json")
+
+        client.close()
+
+        if doc is None:
+            log.warning("atlas.fallback: unsupported path pattern: %s", native_path)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Regional data-service unreachable; Atlas fallback does not support path: {native_path}",
+            )
+
+        import json
+        log.info("atlas.fallback: served %s from Atlas", native_path)
+        return Response(content=json.dumps(doc), media_type="application/json")
+
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Database unavailable: {exc}")
+        log.error("atlas.fallback: MongoDB Atlas query failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Atlas fallback failed: {exc}")
 
 
-@app.post("/data/{target_region}/{collection}")
-async def write_document(target_region: str, collection: str, request: Request):
-    """Route write to the correct regional store."""
-    body = await request.json()
-    if target_region == REGION:
-        try:
-            db = get_db()
-            db[collection].insert_one(body)
-            return {"status": "written", "region": REGION}
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=str(exc))
+# ---------------------------------------------------------------------------
+# Proxy
+# ---------------------------------------------------------------------------
 
-    base = REGION_URLS.get(target_region)
+@app.api_route("/data/{region}/{native_path:path}", methods=["GET", "POST", "PATCH", "DELETE"])
+async def proxy(region: str, native_path: str, request: Request):
+    """
+    Forward the request to the correct regional data-service.
+    Falls back to Atlas for GET requests when the service is unreachable.
+    """
+    base = REGION_URLS.get(region)
     if not base:
-        raise HTTPException(status_code=400, detail=f"Unknown region: {target_region}")
+        raise HTTPException(status_code=400, detail=f"Unknown region: {region!r}")
+
+    target_url = f"{base}/{native_path}"
+    body       = await request.body()
+    params     = dict(request.query_params)
+    content_type = request.headers.get("content-type", "application/json")
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(f"{base}/data/{target_region}/{collection}", json=body)
-            resp.raise_for_status()
-            return resp.json()
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Remote write failed: {exc}")
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.request(
+                method  = request.method,
+                url     = target_url,
+                content = body,
+                params  = params,
+                headers = {"Content-Type": content_type},
+            )
+            return Response(
+                content    = resp.content,
+                status_code= resp.status_code,
+                media_type = resp.headers.get("content-type", "application/json"),
+            )
+
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        log.warning(
+            "proxy: regional data-service unreachable region=%s path=%s: %s",
+            region, native_path, exc,
+        )
+        if request.method == "GET":
+            log.info("proxy: attempting Atlas fallback for region=%s path=%s", region, native_path)
+            return _atlas_fallback(region, native_path)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Regional data-service for '{region}' is unreachable. "
+                   f"Writes require a live data-service — Atlas fallback covers reads only.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+async def health():
+    checks = {}
+    for region, url in REGION_URLS.items():
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                r = await client.get(f"{url}/health")
+                checks[f"data-service-{region}"] = "ok" if r.status_code == 200 else f"http {r.status_code}"
+        except Exception as e:
+            checks[f"data-service-{region}"] = f"error: {e}"
+    checks["atlas_configured"] = bool(MONGO_ATLAS_URI)
+    ok = all(v == "ok" for k, v in checks.items() if k != "atlas_configured")
+    return {
+        "status":  "ok" if ok else "degraded",
+        "service": SERVICE_NAME,
+        "region":  REGION,
+        "checks":  checks,
+    }
 
 
 @app.get("/data/regions/status")

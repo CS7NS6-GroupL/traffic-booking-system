@@ -14,7 +14,8 @@ what it does during the outage, how it recovers, and what the driver or authorit
 | Kafka | Producer exception | booking-service outbox buffers publishes | Broker up → drain outbox |
 | validation-service | Consumer exception | `while True` loop restarts consumer (5s) | Auto-restart within seconds |
 | Redis (regional) | Empty capacity keys | Bookings blocked until re-seeded | Watchdog re-seeds from MongoDB (≤30s) |
-| MongoDB (regional) | `serverSelectionTimeoutMS` (5s) | Validation writes REJECTED on failure | Connection pool reconnects |
+| MongoDB shard 0 (regional) | `serverSelectionTimeoutMS` (5s) | Validation writes REJECTED on failure | Connection pool reconnects |
+| MongoDB shard 1 (regional) | `serverSelectionTimeoutMS` (5s) | Bookings hashing to shard 1 rejected; fan-out reads return partial results | Connection pool reconnects; rebuild_redis counters converge on next wipe |
 | notification-service instance | nginx health probe / WebSocket drop | Other instance handles pub/sub | Driver reconnects; Redis pub/sub resumes |
 | Route-service | HTTP 5xx / timeout | journey-management retries (3×, backoff) | Service up → requests succeed |
 | Regional network partition | Sub-booking never arrives at coordinator | Cross-region sagas involving that region stay PENDING | Partition heals → Kafka delivers |
@@ -60,7 +61,12 @@ what it does during the outage, how it recovers, and what the driver or authorit
 
 **Recovery:** restart the crashed instance → it becomes the standby (loses the `SET NX` race to the now-running leader).
 
-**Known limitation:** in-flight sagas at the exact moment of crash are not recovered. The coordinator's in-memory state is lost. The saga stays `PENDING` indefinitely — no saga timeout watchdog is implemented. Capacity in already-approved regions remains reserved.
+**Saga recovery on leader startup:** immediately after winning the leader election, the new instance scans MongoDB for sagas in `PENDING` or `ABORTING` state before starting the Kafka consumer:
+- `ABORTING` sagas: re-sends capacity-releases for all approved regions, marks saga `ABORTED`, publishes a `REJECTED` outcome to notify the driver.
+- `PENDING` + all regional outcomes already in MongoDB: replays `_advance_saga` to trigger the commit or abort that the crashed leader never published.
+- `PENDING` + outcomes still missing: no action needed — Kafka consumer group replay delivers them once the consumer starts.
+
+**Remaining limitation:** sagas where the coordinator crashed *during* a regional write (partial commit) are not automatically repaired — the booking may exist in some regions but not others. This is a known limitation.
 
 ---
 
@@ -93,11 +99,14 @@ what it does during the outage, how it recovers, and what the driver or authorit
 - Existing locks are gone: no double-lock issue because any in-flight validation would have failed when Redis dropped.
 - If this is redis-laos: the journey-management leader key is lost → standby wins election immediately (faster than the normal 30s TTL path).
 
-**Recovery — capacity re-seeding:**
+**Recovery — full Redis rebuild:**
 - Docker restart policy brings Redis back automatically.
-- The **watchdog** in validation-service (`_watchdog_loop`) periodically checks for a probe key (`watchdog:probe:{region}`). On restart the key is missing → watchdog triggers `_seed_redis_capacity()`, which reads `osm_edges` from MongoDB and writes all `capacity:segment:*` keys.
-- Re-seeding completes within ~30 seconds (depending on graph size).
-- **`current:segment:*` keys are reset to 0** on re-seed (via `SET NX` — does not overwrite if they already exist). If Redis crashed with live bookings, the live counts are lost. This is a known accuracy tradeoff in the demo: counters recover from 0, which may allow slightly more bookings than the strict limit until the next restart cycle.
+- The **watchdog** in validation-service polls every 30s for a probe key (`watchdog:probe:{region}`). On restart the key is missing → watchdog calls `rebuild_redis.main()`, which performs a full rebuild in three steps:
+  1. Hard-overwrite all `capacity:segment:*` keys from `osm_edges` (road-type based capacity limits).
+  2. Reset all `current:segment:*` keys to 0.
+  3. Scan all `approved`/`pending` bookings in MongoDB and increment each segment's counter — restoring accurate occupancy.
+- Rebuild completes within ~30 seconds (depending on graph size).
+- During the rebuild window, new bookings are rejected (capacity keys missing → fail-safe 0). This is conservative and preferable to over-approving.
 
 ---
 
@@ -114,6 +123,44 @@ what it does during the outage, how it recovers, and what the driver or authorit
 **Effect on route-service:** graph is loaded at startup from MongoDB. If MongoDB is down at startup, the graph fails to load and the service reports unhealthy. If MongoDB goes down after startup, the in-memory graph is unaffected — routing continues normally until the next restart.
 
 **Recovery:** MongoClient connection pool automatically reconnects when the instance comes back. `serverSelectionTimeoutMS` controls the retry window.
+
+---
+
+### Booking shard failure (mongo-{region}-s1)
+
+Each region has a second MongoDB instance (`mongo-{region}-s1`) that holds roughly half the booking records — those whose `MD5(booking_id) % 2 == 1`.
+
+**Failure:** shard-1 MongoDB crashes or becomes unreachable.
+
+**Detection:** `serverSelectionTimeoutMS=5000` in the data-service MongoClient pool.
+
+**Effect on data-service:** operations targeting a shard-1 booking (insert, get, cancel, flag) raise a connection error. Fan-out reads (by driver, by vehicle) return only shard-0 results — the driver sees an incomplete booking list.
+
+**Effect on validation-service:** `insert_booking()` hashes the booking_id and attempts to write to shard 1 → raises → publishes REJECTED outcome. Bookings that hash to shard 0 are unaffected.
+
+**Effect on rebuild_redis:** the watchdog rebuild scans shard 0 and attempts shard 1. If shard 1 is down, a warning is logged and only shard-0 bookings contribute to the occupancy reconstruction — counters for shard-1 bookings will be underestimated until shard 1 recovers.
+
+**Recovery:** Docker restart policy brings shard 1 back. MongoClient reconnects automatically. New bookings that hash to shard 1 succeed again immediately.
+
+**Occupancy counter accuracy after combined Redis wipe + shard-1 crash:** If Redis was wiped while shard 1 was also down, the rebuild only scanned shard-0 bookings. The underestimated counters do **not** self-correct: when a shard-1 booking is later cancelled, the Lua safe-DECR finds the counter at 0 and does nothing. The counters remain permanently underestimated until a fresh rebuild runs with both shards healthy.
+
+**Why not trigger a rebuild automatically when shard-1 recovers?** A full rebuild zeros all `current:segment:*` counters before reconstructing them (step 2). Any booking approved during that ~30-second reconstruction window gets double-counted — incremented once by the live validation path and once by the rebuild scan — producing an overcount. That is worse than the undercount being fixed. An automatic rebuild on shard recovery would also cause a ~30-second booking outage on every shard bounce, since `capacity:segment:*` keys are temporarily missing during the overwrite.
+
+**Operator recovery procedure** (run once both shards are confirmed healthy):
+```bash
+# Force a clean rebuild by deleting the watchdog probe key.
+# The watchdog detects the missing key within 30s and runs a full rebuild
+# across both shards, restoring accurate occupancy counts.
+# Replace 'andorra' with the affected region.
+docker exec redis-andorra redis-cli DEL watchdog:probe:andorra
+```
+
+Wait for the rebuild log before sending traffic:
+```bash
+docker logs validation-service-andorra-1 2>&1 | grep -E "rebuild complete|shards scanned" | tail -3
+```
+
+**Note:** shard-0 failure behaves like the base MongoDB failure scenario above and is more severe, since shard 0 also holds sagas, osm_edges, flags, and audit logs.
 
 ---
 
@@ -228,11 +275,12 @@ These are the most complex failure cases because they involve multiple independe
 
 ## Known Limitations Summary
 
-| Limitation | Impact | Mitigation (not implemented) |
+| Limitation | Impact | Status |
 |---|---|---|
-| No saga timeout watchdog | Cross-region sagas involving a crashed/partitioned region stay `PENDING` forever; capacity stays reserved | Background watchdog scans `status:PENDING` sagas older than N seconds, triggers rollback |
-| In-flight saga state lost on JM crash | Saga stuck in PENDING even after leader election | Saga recovery on new-leader startup: scan PENDING sagas and re-advance based on already-recorded outcomes |
-| Redis counter reset to 0 on restart | Capacity counts inaccurate after Redis restart | Persist current counters to MongoDB periodically; restore on Redis startup |
-| Outbox is in-memory | Kafka messages buffered in outbox are lost if booking-service crashes | Persist outbox to MongoDB or Kafka itself (transactional outbox pattern) |
-| NGINX is a single container | Total outage if nginx crashes | Cloud load balancer (ALB/NLB) with multiple nginx instances |
-| No WebSocket re-delivery | Outcomes published while driver's WebSocket is disconnected are not replayed | Persist pending notifications; deliver on reconnect |
+| No saga timeout watchdog | Cross-region sagas where a regional validation-service never responds stay `PENDING` forever; capacity stays reserved | Not implemented |
+| Partial commit on JM crash mid-write | Booking exists in some regions but not others after coordinator crash during regional writes | Not implemented |
+| Outbox is in-memory | Kafka messages buffered in outbox are lost if booking-service crashes | Not implemented — persist outbox to MongoDB (transactional outbox pattern) |
+| NGINX is a single container | Total outage if nginx crashes | Not implemented — use cloud load balancer in production |
+| No WebSocket re-delivery | Outcomes published while driver's WebSocket is disconnected are not replayed | Not implemented — driver can poll `GET /bookings/{id}` |
+| Idempotency cache lost on Redis restart | Brief window where client retries may create duplicate submissions | Acceptable — MongoDB duplicate vehicle check provides second layer of protection |
+| Shard-1 crash leaves occupancy underestimated after Redis wipe | rebuild_redis skips shard-1 bookings when shard 1 is down — counters are permanently underestimated until the next Redis wipe with both shards up (cancelled bookings on shard-1 attempt a safe-DECR that is already 0, so the undercount does not self-correct) | Not implemented — requires either a post-recovery rebuild trigger or persisting per-booking segment increments durably |

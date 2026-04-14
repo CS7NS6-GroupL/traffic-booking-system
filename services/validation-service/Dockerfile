@@ -16,6 +16,9 @@ COPY shared/ /app/shared/
 # Copy data service HTTP client (exposes same interface as data_service.py)
 COPY services/data/data_client.py /app/data/data_service.py
 
+# Copy Redis rebuild script so the watchdog can trigger a full rebuild
+COPY services/data/rebuild_redis.py /app/rebuild_redis.py
+
 # Copy service code
 COPY services/validation-service/ /app/
 

@@ -123,6 +123,18 @@ Saga state machine:
 Within a region: Redis distributed locks provide strong consistency (no overbooking).
 Across regions: The saga provides atomicity at the application level. The consistency window is bounded by Kafka consumer lag (typically < 1s).
 
+### Saga recovery on leader startup
+
+Immediately after winning leader election, the new leader scans MongoDB for stuck sagas before starting the Kafka consumer:
+
+| Saga state | Condition | Recovery action |
+|---|---|---|
+| `ABORTING` | Any | Re-send capacity-releases for approved regions → mark `ABORTED` → publish `REJECTED` outcome |
+| `PENDING` | All regions responded (outcomes in MongoDB) | Replay `_advance_saga` for the last region → triggers commit or abort |
+| `PENDING` | Not all regions responded | No action — Kafka consumer group replay delivers outstanding outcomes once consumer starts |
+
+This closes the window where a coordinator crash after collecting all outcomes but before publishing the final commit/abort would leave a saga stuck in `PENDING` forever.
+
 ---
 
 ## Cancellation

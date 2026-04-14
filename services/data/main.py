@@ -19,14 +19,17 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "data-service")
 @app.get("/health")
 def health():
     checks = {}
-    try:
-        ds.mongo_client.admin.command("ping")
-        checks["mongo"] = "ok"
-    except Exception as e:
-        checks["mongo"] = f"error: {e}"
+    # Ping every booking shard
+    shard_results = ds.ping_all_shards()
+    checks.update(shard_results)
     ok = all(v == "ok" for v in checks.values())
-    return {"status": "ok" if ok else "degraded", "service": SERVICE_NAME,
-            "region": REGION, "checks": checks}
+    return {
+        "status":          "ok" if ok else "degraded",
+        "service":         SERVICE_NAME,
+        "region":          REGION,
+        "total_shards":    ds.TOTAL_BOOKING_SHARDS,
+        "checks":          checks,
+    }
 
 
 # =============================================================================
@@ -98,6 +101,13 @@ def get_saga(saga_id: str):
         raise HTTPException(status_code=404, detail="Saga not found")
     result.pop("_id", None)
     return result
+
+
+@app.get("/sagas")
+def get_sagas_by_status(status: str):
+    """Return all sagas matching any of the given comma-separated statuses."""
+    statuses = [s.strip() for s in status.split(",") if s.strip()]
+    return ds.get_sagas_by_status(statuses)
 
 
 class OutcomeBody(BaseModel):

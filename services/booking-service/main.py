@@ -24,6 +24,7 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "booking-service")
 REGION = os.getenv("REGION", "local")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 JOURNEY_MANAGEMENT_URL = os.getenv("JOURNEY_MANAGEMENT_URL", "http://journey-management:8000")
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis-laos:6379")
 
 # ── Kafka singleton producer ──────────────────────────────────────────────────
 _kafka_producer = None
@@ -78,20 +79,37 @@ def _publish_to_kafka(message: dict):
                     message.get("booking_id"), exc)
         _outbox.put(message)
 
-# ── Idempotency cache ─────────────────────────────────────────────────────────
-_idem: dict = {}
-IDEM_TTL = 300
+# ── Idempotency cache (Redis-backed, shared across both instances) ─────────────
+IDEM_TTL        = 300   # seconds
+IDEM_KEY_PREFIX = "idem:"
+
+_redis_client      = None
+_redis_client_lock = threading.Lock()
+
+def _get_redis():
+    global _redis_client
+    with _redis_client_lock:
+        if _redis_client is None:
+            import redis as redis_lib
+            _redis_client = redis_lib.from_url(REDIS_URL, decode_responses=True)
+    return _redis_client
 
 def _check_idem(key: str):
-    if key in _idem:
-        r, ts = _idem[key]
-        if time.time() - ts < IDEM_TTL:
-            return r
-        del _idem[key]
+    """Return the cached response for this idempotency key, or None."""
+    try:
+        raw = _get_redis().get(f"{IDEM_KEY_PREFIX}{key}")
+        if raw:
+            return json.loads(raw)
+    except Exception as exc:
+        log.warning("idem.check failed (Redis unavailable) — proceeding without cache: %s", exc)
     return None
 
 def _store_idem(key: str, r):
-    _idem[key] = (r, time.time())
+    """Store the response under this idempotency key with TTL."""
+    try:
+        _get_redis().setex(f"{IDEM_KEY_PREFIX}{key}", IDEM_TTL, json.dumps(r))
+    except Exception as exc:
+        log.warning("idem.store failed (Redis unavailable): %s", exc)
 
 # ── tenacity retry helpers for JM HTTP calls ──────────────────────────────────
 @retry(retry=retry_if_exception_type(httpx.TransportError),
