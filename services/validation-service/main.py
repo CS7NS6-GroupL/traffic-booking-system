@@ -411,9 +411,13 @@ def _redis_watchdog():
     Polls Redis every 30s. If the probe key has disappeared (Redis was wiped),
     runs a full rebuild via rebuild_redis.main() — restores both capacity limits
     and current occupancy counters from MongoDB, then resets the probe key.
+
+    Uses a fresh Redis connection each poll cycle so that connection pool state
+    from a previous outage does not suppress detection of recovery.
     """
     PROBE_KEY    = f"watchdog:probe:{REGION}"
     POLL_SECONDS = 30
+    _was_down    = False
 
     try:
         _redis.set(PROBE_KEY, "1")
@@ -423,16 +427,45 @@ def _redis_watchdog():
     while True:
         time.sleep(POLL_SECONDS)
         try:
-            if not _redis.exists(PROBE_KEY):
-                log.warning(
-                    "[validation-service] Redis probe key missing for '%s' — "
-                    "running full rebuild (capacity + occupancy)", REGION
-                )
-                import rebuild_redis
-                rebuild_redis.main()
-                _redis.set(PROBE_KEY, "1")
+            # Fresh connection each cycle — bypasses stale pool state after an outage.
+            r = redis_lib.from_url(REDIS_URL, decode_responses=True,
+                                   socket_connect_timeout=3, socket_timeout=3)
+            try:
+                exists = r.exists(PROBE_KEY)
+
+                if not exists:
+                    # Use a short-lived lock so only one instance runs the rebuild
+                    # when both watchdogs fire in the same poll window.
+                    LOCK_KEY = f"watchdog:rebuild_lock:{REGION}"
+                    acquired = r.set(LOCK_KEY, "1", nx=True, ex=120)
+                    recovering = _was_down
+                    _was_down = False
+                    if not acquired:
+                        log.info(
+                            "[validation-service] Rebuild already running for '%s' (lock held) — skipping", REGION
+                        )
+                    else:
+                        log.warning(
+                            "[validation-service] Redis %s for '%s' — probe key missing, "
+                            "running full rebuild (capacity + occupancy)",
+                            "back up" if recovering else "probe key gone", REGION
+                        )
+                        import rebuild_redis
+                        rebuild_redis.main()
+                        _redis.set(PROBE_KEY, "1")
+                else:
+                    if _was_down:
+                        log.info("[validation-service] Redis recovered for '%s', probe key intact", REGION)
+                    _was_down = False
+            finally:
+                r.close()
         except Exception as exc:
-            log.error("[validation-service] Redis watchdog error: %s", exc)
+            if not _was_down:
+                log.warning(
+                    "[validation-service] Redis unreachable for '%s': %s — "
+                    "bookings will be rejected until Redis recovers", REGION, exc
+                )
+                _was_down = True
 
 
 @app.on_event("startup")

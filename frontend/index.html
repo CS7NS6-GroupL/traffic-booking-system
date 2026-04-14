@@ -678,7 +678,7 @@ const SERVICE_GROUPS = [
       { name:'Route Service',      path:'/api/health/route-laos',       desc:'A* routing on OSM graph' },
       { name:'Validation Service', path:'/api/health/validation-laos',  desc:'Kafka consumer, Redis capacity locks' },
       { name:'Authority Service',  path:'/api/health/authority-laos',   desc:'AUTHORITY-only audit & enforcement' },
-      { name:'Data Service',       path:'/api/health/data-laos',        desc:'Booking storage — Laos MongoDB' },
+      { name:'Data Service',       path:'/api/health/data-laos',        desc:'Booking storage — 2 MongoDB shards (MD5 hash routing)' },
     ],
   },
   {
@@ -688,7 +688,7 @@ const SERVICE_GROUPS = [
       { name:'Route Service',      path:'/api/health/route-cambodia',      desc:'A* routing on OSM graph' },
       { name:'Validation Service', path:'/api/health/validation-cambodia', desc:'Kafka consumer, Redis capacity locks' },
       { name:'Authority Service',  path:'/api/health/authority-cambodia',  desc:'AUTHORITY-only audit & enforcement' },
-      { name:'Data Service',       path:'/api/health/data-cambodia',       desc:'Booking storage — Cambodia MongoDB' },
+      { name:'Data Service',       path:'/api/health/data-cambodia',       desc:'Booking storage — 2 MongoDB shards (MD5 hash routing)' },
     ],
   },
   {
@@ -698,7 +698,7 @@ const SERVICE_GROUPS = [
       { name:'Route Service',      path:'/api/health/route-andorra',      desc:'A* routing on OSM graph' },
       { name:'Validation Service', path:'/api/health/validation-andorra', desc:'Kafka consumer, Redis capacity locks' },
       { name:'Authority Service',  path:'/api/health/authority-andorra',  desc:'AUTHORITY-only audit & enforcement' },
-      { name:'Data Service',       path:'/api/health/data-andorra',       desc:'Booking storage — Andorra MongoDB' },
+      { name:'Data Service',       path:'/api/health/data-andorra',       desc:'Booking storage — 2 MongoDB shards (MD5 hash routing)' },
     ],
   },
 ];
@@ -740,12 +740,22 @@ async function checkHealth() {
       try {
         const d = await fetch(s.path, { cache: 'no-store' }).then(r => r.json());
         const ms = Date.now() - t0;
-        document.getElementById(`hdot-${s._idx}`).className = 'dot dot-up';
-        document.getElementById(`hcard-${s._idx}`).classList.add('up');
+        const isUp = d.status === 'ok';
+        document.getElementById(`hdot-${s._idx}`).className = `dot dot-${isUp ? 'up' : 'down'}`;
+        document.getElementById(`hcard-${s._idx}`).classList.add(isUp ? 'up' : 'down');
+        // Build extra info line
+        let extra = '';
+        if (d.service) extra += ` · <span style="color:#8b949e;font-size:0.7rem">${d.service}</span>`;
+        if (d.is_leader === true)  extra += ` · <span style="color:#d29922;font-size:0.7rem">leader</span>`;
+        if (d.is_leader === false) extra += ` · <span style="color:#484f58;font-size:0.7rem">standby</span>`;
+        if (d.total_shards > 1) {
+          const shardChecks = Object.entries(d.checks || {}).filter(([k]) => k.startsWith('shard_'));
+          const allOk = shardChecks.every(([,v]) => v === 'ok');
+          extra += ` · <span style="color:${allOk?'#3fb950':'#f85149'};font-size:0.7rem">${d.total_shards} shards ${allOk?'✓':'⚠'}</span>`;
+        }
         document.getElementById(`hinfo-${s._idx}`).innerHTML =
-          `<span style="color:#3fb950">online</span> <span style="color:#484f58">${ms}ms</span>` +
-          (d.service ? ` · <span style="color:#8b949e;font-size:0.7rem">${d.service}</span>` : '');
-        return true;
+          `<span style="color:${isUp?'#3fb950':'#d29922'}">${isUp?'online':'degraded'}</span> <span style="color:#484f58">${ms}ms</span>${extra}`;
+        return isUp;
       } catch {
         document.getElementById(`hdot-${s._idx}`).className = 'dot dot-down';
         document.getElementById(`hcard-${s._idx}`).classList.add('down');

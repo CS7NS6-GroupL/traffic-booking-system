@@ -256,13 +256,41 @@ def _recover_pending_sagas():
                             "segments":      saga.get("segments_by_region", {}).get(r, []),
                         })
                 producer.flush()
+
+                # Write rejected booking record to all involved regions.
+                now = datetime.utcnow().isoformat()
+                reject_reason = next(
+                    (o["reason"] for o in outcomes.values() if o.get("outcome") == "REJECTED"),
+                    "Saga recovered from ABORTING state after coordinator restart",
+                )
+                rejected_doc = {
+                    "booking_id":       saga["booking_id"],
+                    "saga_id":          saga_id,
+                    "driver_id":        saga["driver_id"],
+                    "vehicle_id":       saga["vehicle_id"],
+                    "origin":           saga.get("origin", ""),
+                    "destination":      saga.get("destination", ""),
+                    "departure_time":   saga.get("departure_time", ""),
+                    "regions_involved": regions_involved,
+                    "status":           "rejected",
+                    "reject_reason":    reject_reason,
+                    "rejected_at":      now,
+                    "created_at":       now,
+                }
+                segs_by_region = saga.get("segments_by_region", {})
+                for r in regions_involved:
+                    try:
+                        _regional_ds_post(r, "/bookings", {**rejected_doc, "region": r, "segments": segs_by_region.get(r, [])})
+                    except Exception as exc:
+                        log.warning("saga.recovery: reject_write failed region=%s: %s", r, exc)
+
                 ds.update_saga_status(saga_id, "ABORTED")
                 producer.send("booking-outcomes", {
                     "booking_id":        saga["booking_id"],
                     "saga_id":           saga_id,
                     "driver_id":         saga["driver_id"],
                     "outcome":           "REJECTED",
-                    "reason":            "Saga recovered from ABORTING state after coordinator restart",
+                    "reason":            reject_reason,
                     "regional_outcomes": outcomes,
                 })
                 producer.flush()
@@ -332,17 +360,31 @@ def _find_booking_across_regions(booking_id: str):
 
 
 def _get_bookings_by_driver_all_regions(driver_id: str) -> list:
-    """Scatter-gather bookings for a driver across all regional data-services."""
-    all_bookings = []
+    """
+    Scatter-gather bookings for a driver across all regional data-services.
+    Cross-region bookings are written to every involved region's data-service,
+    so the same booking_id may appear multiple times. Deduplicate by booking_id,
+    keeping the record that has the most information (regions_involved list).
+    """
+    seen: dict[str, dict] = {}  # booking_id → best record so far
     for region, url in REGION_DATA_SERVICES.items():
         try:
             with httpx.Client(timeout=5.0) as c:
                 r = c.get(f"{url}/bookings/driver/{driver_id}")
                 if r.status_code == 200:
-                    all_bookings.extend(r.json() or [])
+                    for b in (r.json() or []):
+                        bid = b.get("booking_id")
+                        if not bid:
+                            continue
+                        if bid not in seen:
+                            seen[bid] = b
+                        else:
+                            # Prefer the record that carries regions_involved
+                            if b.get("regions_involved") and not seen[bid].get("regions_involved"):
+                                seen[bid] = b
         except Exception:
             pass
-    return sorted(all_bookings, key=lambda b: b.get("created_at", ""), reverse=True)
+    return sorted(seen.values(), key=lambda b: b.get("created_at", ""), reverse=True)
 
 
 def _cancel_booking_in_region(booking_id: str, cancelled_at: str, region: str):
@@ -670,13 +712,48 @@ def _advance_saga(saga_id: str, region: str, outcome: str, reason: str):
                         "segments":      saga["segments_by_region"].get(r, []),
                     })
             producer.flush()
+
+            # Write a rejected booking record to every involved region so the
+            # authority audit log shows the attempt. Mirrors the commit path which
+            # writes an approved record to every region.
+            now = datetime.utcnow().isoformat()
+            reject_reason = next(
+                (o["reason"] for o in outcomes.values() if o["outcome"] == "REJECTED"),
+                "One or more regions rejected the sub-booking",
+            )
+            rejected_doc = {
+                "booking_id":       saga["booking_id"],
+                "saga_id":          saga_id,
+                "driver_id":        saga["driver_id"],
+                "vehicle_id":       saga["vehicle_id"],
+                "origin":           saga["origin"],
+                "destination":      saga["destination"],
+                "departure_time":   saga["departure_time"],
+                "regions_involved": regions_involved,
+                "status":           "rejected",
+                "reject_reason":    reject_reason,
+                "rejected_at":      now,
+                "created_at":       now,
+            }
+            segments_by_region = saga.get("segments_by_region", {})
+            for r in regions_involved:
+                regional_doc = {
+                    **rejected_doc,
+                    "region":   r,
+                    "segments": segments_by_region.get(r, []),
+                }
+                try:
+                    _regional_ds_post(r, "/bookings", regional_doc)
+                except Exception as exc:
+                    log.warning("saga.reject_write failed region=%s saga_id=%s: %s", r, saga_id, exc)
+
             ds.update_saga_status(saga_id, "ABORTED")
             producer.send("booking-outcomes", {
                 "booking_id":        saga["booking_id"],
                 "saga_id":           saga_id,
                 "driver_id":         saga["driver_id"],
                 "outcome":           "REJECTED",
-                "reason":            "One or more regions rejected the sub-booking",
+                "reason":            reject_reason,
                 "regional_outcomes": outcomes,
             })
         else:

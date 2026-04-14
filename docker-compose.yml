@@ -22,9 +22,6 @@ volumes:
   mongo-laos-s1-data:
   mongo-cambodia-s1-data:
   mongo-andorra-s1-data:
-  redis-laos-data:
-  redis-cambodia-data:
-  redis-andorra-data:
 
 services:
 
@@ -84,10 +81,8 @@ services:
   redis-laos:
     image: redis:7-alpine
     container_name: redis-laos
-    command: redis-server --save 60 1
+    command: redis-server --save "" --appendonly no
     restart: unless-stopped
-    volumes:
-      - redis-laos-data:/data
     networks:
       - traffic-net
     healthcheck:
@@ -99,10 +94,8 @@ services:
   redis-cambodia:
     image: redis:7-alpine
     container_name: redis-cambodia
-    command: redis-server --save 60 1
+    command: redis-server --save "" --appendonly no
     restart: unless-stopped
-    volumes:
-      - redis-cambodia-data:/data
     networks:
       - traffic-net
     healthcheck:
@@ -114,10 +107,8 @@ services:
   redis-andorra:
     image: redis:7-alpine
     container_name: redis-andorra
-    command: redis-server --save 60 1
+    command: redis-server --save "" --appendonly no
     restart: unless-stopped
-    volumes:
-      - redis-andorra-data:/data
     networks:
       - traffic-net
     healthcheck:
@@ -261,7 +252,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -291,7 +282,7 @@ services:
         aliases:
           - data-service-laos
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -317,7 +308,7 @@ services:
         aliases:
           - data-service-laos
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -345,7 +336,7 @@ services:
         aliases:
           - data-service-cambodia
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -371,7 +362,7 @@ services:
         aliases:
           - data-service-cambodia
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -399,7 +390,7 @@ services:
         aliases:
           - data-service-andorra
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -425,7 +416,7 @@ services:
         aliases:
           - data-service-andorra
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -452,7 +443,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -478,7 +469,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -504,7 +495,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -532,7 +523,7 @@ services:
         aliases:
           - notification-service
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -558,7 +549,7 @@ services:
         aliases:
           - notification-service
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -584,7 +575,7 @@ services:
         aliases:
           - data-service
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -606,7 +597,7 @@ services:
         aliases:
           - data-service
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8009/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -655,7 +646,7 @@ services:
         aliases:
           - journey-management
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -700,7 +691,7 @@ services:
         aliases:
           - journey-management
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -736,7 +727,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -774,7 +765,7 @@ services:
         aliases:
           - booking-service
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -808,7 +799,7 @@ services:
         aliases:
           - booking-service
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -834,7 +825,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -872,7 +863,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -908,7 +899,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -936,7 +927,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -974,7 +965,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -1010,7 +1001,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -1038,7 +1029,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -1076,7 +1067,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -1112,7 +1103,7 @@ services:
     networks:
       - traffic-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
