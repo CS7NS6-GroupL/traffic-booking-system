@@ -1,9 +1,9 @@
 # Demo Script — Distributed Traffic Booking System
 ## CS7NS6 Group L — Focus: Distributed Systems Properties
 
-**~20 minutes total.**
+**~35 minutes total.**
 Primary interface: browser at `http://localhost`
-Terminal (PowerShell) needed for the concurrent booking demo (Step 5) and failure demos (Steps 7–8).
+Two PowerShell terminals needed throughout.
 
 ---
 
@@ -17,12 +17,12 @@ foreach ($mongo in @("mongo-laos","mongo-laos-s1","mongo-cambodia","mongo-cambod
     docker exec $mongo mongosh --quiet --eval "db.getSiblingDB('traffic').bookings.deleteMany({})" 2>$null
 }
 
-# 2. Clear sagas and flags from shard-0 of each region (shard 0 holds all non-booking data)
+# 2. Clear sagas and flags from shard-0 of each region
 foreach ($mongo in @("mongo-laos","mongo-cambodia","mongo-andorra")) {
     docker exec $mongo mongosh --quiet --eval "db.getSiblingDB('traffic').sagas.deleteMany({}); db.getSiblingDB('traffic').flags.deleteMany({})" 2>$null
 }
 
-# 3. Clear users (user-registry uses the shared 'mongo' container)
+# 3. Clear users
 docker exec mongo mongosh --quiet --eval "db.getSiblingDB('traffic').users.deleteMany({})" 2>$null
 
 # 4. Reset Redis occupancy counters to 0 for all regions (capacity limits stay intact)
@@ -30,17 +30,19 @@ foreach ($redis in @("redis-laos","redis-cambodia","redis-andorra")) {
     $keys = docker exec $redis redis-cli KEYS "current:segment:*"
     if ($keys) { docker exec $redis redis-cli DEL @($keys.Split("`n") | Where-Object { $_ }) | Out-Null }
 }
+
+# 5. Remove all demo delays
+curl.exe -s -X POST "http://localhost:8008/debug/delay?saga_commit_seconds=0" | Out-Null
+curl.exe -s -X POST "http://localhost:8018/debug/delay?saga_commit_seconds=0" | Out-Null
+curl.exe -s -X POST "http://localhost:8005/debug/delay?validation_seconds=0" | Out-Null
+curl.exe -s -X POST "http://localhost:8015/debug/delay?validation_seconds=0" | Out-Null
+curl.exe -s -X POST "http://localhost:8025/debug/delay?validation_seconds=0" | Out-Null
 ```
 
 Re-register demo users after a reset:
 ```powershell
-# Driver: alice
 curl.exe -s -X POST http://localhost/api/auth/register -H "Content-Type: application/json" -d '{"username":"alice","password":"pass123","vehicle_id":"veh-001","role":"DRIVER"}'
-
-# Driver: bob
 curl.exe -s -X POST http://localhost/api/auth/register -H "Content-Type: application/json" -d '{"username":"bob","password":"pass123","vehicle_id":"veh-002","role":"DRIVER"}'
-
-# Authority user
 curl.exe -s -X POST http://localhost/api/auth/register -H "Content-Type: application/json" -d '{"username":"authority1","password":"pass123","vehicle_id":"","role":"AUTHORITY"}'
 ```
 
@@ -57,7 +59,7 @@ docker restart traffic-booking-system-validation-service-laos-1-1 traffic-bookin
 ```
 
 Open **two browser windows** at `http://localhost` (Window A = alice/authority, Window B = bob).
-Open one PowerShell terminal.
+Open **two PowerShell terminals** (Terminal 1 = commands, Terminal 2 = log tails).
 
 ---
 
@@ -65,7 +67,6 @@ Open one PowerShell terminal.
 
 **In Window A:** click the **System Health** tab. Click **Refresh All**.
 
-> **What to say:**
 > "We have 18 application-level services. The health tab pings each one. Notice the four colour
 > groups — Global, Laos, Cambodia, Andorra. Each region has its own Route Service, Validation
 > Service, Authority Service, and Data Service. They are completely isolated — the Laos Data
@@ -117,6 +118,7 @@ My Bookings table auto-refreshes showing the booking as `approved`.
 
 **Optional — show shard routing in terminal (30 seconds):**
 ```powershell
+$TOKEN_ALICE = (curl.exe -s -X POST http://localhost/api/auth/login -H "Content-Type: application/json" -d '{"username":"alice","password":"pass123"}' | ConvertFrom-Json).access_token
 $BID = (curl.exe -s http://localhost/api/bookings/alice -H "Authorization: Bearer $TOKEN_ALICE" | ConvertFrom-Json)[0].booking_id; echo $BID
 docker exec mongo-laos    mongosh --quiet --eval "db.getSiblingDB('traffic').bookings.countDocuments({booking_id:'$BID'})" 2>$null
 docker exec mongo-laos-s1 mongosh --quiet --eval "db.getSiblingDB('traffic').bookings.countDocuments({booking_id:'$BID'})" 2>$null
@@ -227,32 +229,37 @@ Reload the audit log — booking shows `flagged` status with the reason.
 > default is capacity = 0, which blocks all new bookings. We have a watchdog that detects
 > the empty Redis and runs a full rebuild from MongoDB."
 
-Open the watchdog log stream in a **second terminal** before crashing Redis so the audience sees the full sequence live:
+Open the watchdog log stream in **Terminal 2** before crashing Redis:
 ```powershell
-docker logs -f traffic-booking-system-validation-service-andorra-1-1
+docker logs -f traffic-booking-system-validation-service-andorra-1-1 2>&1 | Select-String "unreachable|back up|probe key|rebuild|Seeded|REJECTED"
 ```
 
-In the main terminal — confirm Redis is healthy then crash it:
+In **Terminal 1** — confirm Redis is healthy then crash it:
 ```powershell
 docker exec redis-andorra redis-cli KEYS "capacity:segment:*" | Measure-Object -Line
 docker stop redis-andorra
 ```
 
+Terminal 2 prints:
+```
+Redis unreachable for 'andorra' — bookings will be rejected until Redis recovers
+```
+
 Try to book **Andorra la Vella → Canillo** in the browser → red REJECTED notification.
 
 > "Redis is gone. The validation service can't acquire a lock or check capacity, so
-> it rejects everything. The log window shows one 'Redis unreachable' warning — then
-> silence. It won't spam the log every 30 seconds."
+> it rejects everything. The log shows one 'Redis unreachable' warning — then silence.
+> It won't spam the log every 30 seconds."
 
-Bring Redis back and immediately force the watchdog to see it as empty (delete the probe key before any validation service can re-set it):
+Bring Redis back and force the watchdog to trigger:
 ```powershell
 docker start redis-andorra; docker exec redis-andorra redis-cli DEL watchdog:probe:andorra
 ```
 
-Watch the second terminal — within 30 seconds you'll see:
+Terminal 2 prints within 30 seconds:
 ```
 Redis back up for 'andorra' — probe key missing, running full rebuild
-...
+Seeded N Redis segment keys...
 rebuild complete
 ```
 
@@ -263,59 +270,135 @@ docker exec redis-andorra redis-cli KEYS "capacity:segment:*" | Measure-Object -
 
 Try the Andorra booking again — it goes through.
 
-> "No operator intervention beyond restarting Redis. The watchdog detected the missing
-> probe key, rebuilt capacity limits from OSM edge data, and reconstructed current
-> occupancy from all approved and pending bookings across both MongoDB shards.
-> Counters are accurate — not just zeroed out."
-
-> "No operator intervention once Redis is restarted. The watchdog ran a full rebuild —
-> capacity limits from OSM edge data AND current occupancy reconstructed from all
-> approved and pending bookings in both MongoDB shards. Counters are accurate, not
-> just zeroed out."
+> "No operator intervention beyond restarting Redis. The watchdog rebuilt capacity limits
+> from OSM edge data AND reconstructed current occupancy from all approved and pending
+> bookings across both MongoDB shards. Counters are accurate — not just zeroed out."
 
 ---
 
-## STEP 8 — Failure Demo B: Journey-Management Leader Crash + Election (3 min)
+## STEP 8 — Failure Demo B: Validation-Service Crash + Kafka Re-delivery (3 min)
 
-> "Journey Management runs two instances. Only one runs the Kafka saga coordinator —
-> the leader, shown on the health card. If the leader crashes, the standby wins the
-> next election within 30 seconds."
+> "The validation service acquires a Redis lock and confirms capacity is available.
+> If it crashes at that exact moment — before incrementing the counter or writing to
+> MongoDB — Kafka re-delivers the message to the surviving instance. The lock has a
+> 10-second TTL, so it self-cleans. The surviving instance re-validates from scratch
+> and approves the booking. One message, one approval, no duplicates."
 
-**System Health tab → Refresh All** — note which instance says 'leader'.
-
+Inject a 20-second delay so there's time to kill the service:
 ```powershell
-# Confirm leader status
-curl.exe -s http://localhost/api/health/journey-1 | python -m json.tool
-curl.exe -s http://localhost/api/health/journey-2 | python -m json.tool
+curl.exe -s -X POST "http://localhost:8005/debug/delay?validation_seconds=20"
 ```
 
-Stop the leader (assume instance 1):
+Open **Terminal 2** (two tabs side by side if possible):
+```powershell
+# Tab A — the instance that will crash
+docker logs -f traffic-booking-system-validation-service-laos-1-1 2>&1 | Select-String "DEMO|received from Kafka|APPROVED|REJECTED|locks released|dedup"
+
+# Tab B — the instance that takes over
+docker logs -f traffic-booking-system-validation-service-laos-2-1 2>&1 | Select-String "DEMO|received from Kafka|APPROVED|REJECTED|locks released|dedup"
+```
+
+**In Window A (re-login as alice if needed):** Quick Routes → **Vientiane → Luang Prabang** → Submit Booking.
+
+Tab A prints:
+```
+[DEMO] validation_delay: locks held, capacity confirmed — sleeping 20s (kill me now)
+```
+
+Kill it immediately:
+```powershell
+docker stop traffic-booking-system-validation-service-laos-1-1
+```
+
+Tab B prints:
+```
+received from Kafka: booking <id>      ← Kafka re-delivered after offset reset
+Redis locks released, counters incremented
+booking <id> → APPROVED
+```
+
+Booking completes in the browser (APPROVED notification).
+
+> "The lock expired 10 seconds after laos-1 died. laos-2 acquired it fresh, found
+> capacity available — the counter was never incremented by laos-1 — and approved.
+> Exactly one record in MongoDB. This is at-least-once delivery doing its job."
+
+Bring laos-1 back and clear the delay:
+```powershell
+docker start traffic-booking-system-validation-service-laos-1-1
+curl.exe -s -X POST "http://localhost:8005/debug/delay?validation_seconds=0" | Out-Null
+```
+
+---
+
+## STEP 9 — Failure Demo C: Journey-Management Leader Crash + Election (4 min)
+
+> "Journey Management runs two instances. Only one runs the Kafka saga coordinator —
+> the leader. If it crashes mid-saga, after all regions have approved but before it
+> writes the final booking record, the standby wins the election, scans MongoDB for
+> PENDING sagas, and commits the one that was in flight. No booking is lost."
+
+Check which instance is the leader and inject a delay on it:
+```powershell
+curl.exe -s http://localhost/api/health/journey-1 | python -m json.tool
+curl.exe -s http://localhost/api/health/journey-2 | python -m json.tool
+# Look for "is_leader": true.
+
+# Inject delay on the leader (8008 = instance 1, 8018 = instance 2)
+curl.exe -s -X POST "http://localhost:8008/debug/delay?saga_commit_seconds=30"
+```
+
+Open **Terminal 2** (two tabs):
+```powershell
+# Tab A — the leader (will crash)
+docker logs -f traffic-booking-system-journey-management-1-1 2>&1 | Select-String "DEMO|saga\."
+
+# Tab B — the standby (will take over)
+docker logs -f traffic-booking-system-journey-management-2-1 2>&1 | Select-String "DEMO|leader|recovery|saga\.|joined group saga"
+```
+
+**In Window B (bob):** Quick Routes → **Vientiane → Phnom Penh** → Submit Booking.
+
+Tab A prints:
+```
+[DEMO] saga_commit_delay: sleeping 30s before final commit/abort — kill the leader now
+```
+
+Kill it immediately:
 ```powershell
 docker stop traffic-booking-system-journey-management-1-1
 ```
 
-**System Health → Refresh All** — journey-management-1 card goes red.
+Tab B prints (in order):
+```
+saga-coordinator: not leader, waiting 5s...    ← was polling, hasn't won yet
+saga-coordinator: acquired leader lock          ← Redis TTL expired, election won
+saga.recovery: found 1 stuck saga(s)            ← PENDING scan on startup
+saga.recovery: PENDING saga <id> replaying      ← all outcomes already in MongoDB
+(POST to data-service-laos + data-service-cambodia)
+Successfully joined group saga-coordinator-group ← Kafka consumer now live
+```
 
-Submit a cross-region booking (Window B, bob, Vientiane → Phnom Penh) — it still completes. journey-management-2 handled the plan.
+Booking completes in the browser (APPROVED notification).
 
+Confirm the new leader and restore instance 1 as standby:
 ```powershell
-# Wait for election (~30s), then confirm new leader
-Start-Sleep 35
 curl.exe -s http://localhost/api/health/journey-2 | python -m json.tool
-```
+# "is_leader": true
 
-Restart the crashed instance — it becomes the standby:
-```powershell
 docker start traffic-booking-system-journey-management-1-1
-Start-Sleep 5
-curl.exe -s http://localhost/api/health/journey-1 | python -m json.tool
 ```
 
-> "Before starting the Kafka consumer, the new leader scanned MongoDB for stuck sagas
-> in ABORTING or PENDING state and replayed their final steps. Then it consumed from
-> the last committed Kafka offset — no messages were lost. This is why we use Kafka
-> instead of direct HTTP: Kafka is the durable ordered log; services are stateless
-> workers on top of it."
+Reset the delay (instance 2 is now the leader):
+```powershell
+curl.exe -s -X POST "http://localhost:8018/debug/delay?saga_commit_seconds=0" | Out-Null
+```
+
+> "Before starting the Kafka consumer, the new leader scanned MongoDB for PENDING sagas.
+> It found one — all regional outcomes were already there — and committed it in under
+> 50 milliseconds. Then the Kafka consumer joined and replayed the outcome messages,
+> found the saga already COMMITTED, and skipped them. Kafka is the durable log;
+> MongoDB is the saga state machine. Together they make the recovery deterministic."
 
 ---
 

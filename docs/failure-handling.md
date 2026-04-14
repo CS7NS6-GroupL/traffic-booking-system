@@ -12,8 +12,8 @@ what it does during the outage, how it recovers, and what the driver or authorit
 | booking-service instance | nginx health probe | Other instance handles all traffic | Restart → rejoin upstream |
 | journey-management instance | Redis TTL expiry (30s) | Standby wins leader election | Restart → becomes standby |
 | Kafka | Producer exception | booking-service outbox buffers publishes | Broker up → drain outbox |
-| validation-service | Consumer exception | `while True` loop restarts consumer (5s) | Auto-restart within seconds |
-| Redis (regional) | Empty capacity keys | Bookings blocked until re-seeded | Watchdog re-seeds from MongoDB (≤30s) |
+| validation-service | Consumer exception | `while True` loop restarts consumer (5s); Kafka re-delivers unacked messages | Auto-restart within seconds |
+| Redis (regional) | Single `unreachable` warning then silence; probe key gone on restart | Bookings blocked (capacity treated as 0) | Watchdog detects missing probe key → full rebuild from MongoDB (≤30s) |
 | MongoDB shard 0 (regional) | `serverSelectionTimeoutMS` (5s) | Validation writes REJECTED on failure | Connection pool reconnects |
 | MongoDB shard 1 (regional) | `serverSelectionTimeoutMS` (5s) | Bookings hashing to shard 1 rejected; fan-out reads return partial results | Connection pool reconnects; rebuild_redis counters converge on next wipe |
 | notification-service instance | nginx health probe / WebSocket drop | Other instance handles pub/sub | Driver reconnects; Redis pub/sub resumes |
@@ -273,6 +273,23 @@ These are the most complex failure cases because they involve multiple independe
 
 ---
 
+## Demo Delay Injection
+
+Both `validation-service` and `journey-management` expose a `POST /debug/delay` endpoint
+that injects a sleep at a critical point, creating a wide enough window to kill the
+container and observe recovery. Delays are zero by default and have no effect on normal
+operation. See `docs/DEMO_SCRIPT.md` Steps 8–9 for the full scripts.
+
+| Service | Endpoint | Delay point |
+|---|---|---|
+| validation-service-laos-1 | `POST http://localhost:8005/debug/delay?validation_seconds=N` | After capacity confirmed, before counter increment |
+| journey-management-1 | `POST http://localhost:8008/debug/delay?saga_commit_seconds=N` | After all outcomes collected, before final commit publish |
+| journey-management-2 | `POST http://localhost:8018/debug/delay?saga_commit_seconds=N` | Same, on instance 2 |
+
+Reset all delays: `curl.exe -s -X POST "http://localhost:800X/debug/delay?..._seconds=0"`
+
+---
+
 ## Known Limitations Summary
 
 | Limitation | Impact | Status |
@@ -283,4 +300,4 @@ These are the most complex failure cases because they involve multiple independe
 | NGINX is a single container | Total outage if nginx crashes | Not implemented — use cloud load balancer in production |
 | No WebSocket re-delivery | Outcomes published while driver's WebSocket is disconnected are not replayed | Not implemented — driver can poll `GET /bookings/{id}` |
 | Idempotency cache lost on Redis restart | Brief window where client retries may create duplicate submissions | Acceptable — MongoDB duplicate vehicle check provides second layer of protection |
-| Shard-1 crash leaves occupancy underestimated after Redis wipe | rebuild_redis skips shard-1 bookings when shard 1 is down — counters are permanently underestimated until the next Redis wipe with both shards up (cancelled bookings on shard-1 attempt a safe-DECR that is already 0, so the undercount does not self-correct) | Not implemented — requires either a post-recovery rebuild trigger or persisting per-booking segment increments durably |
+| Shard-1 crash leaves occupancy underestimated after Redis wipe | rebuild_redis skips shard-1 bookings when shard 1 is down — counters are permanently underestimated until the next Redis wipe with both shards up | Not implemented — operator must run `docker exec redis-{region} redis-cli DEL watchdog:probe:{region}` once both shards are healthy |
