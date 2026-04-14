@@ -42,6 +42,30 @@ log = logging.getLogger("journey-management")
 
 sys.path.insert(0, "/app/shared")
 
+# ---------------------------------------------------------------------------
+# Demo / fault-injection delays — toggled at runtime via POST /debug/delay
+# ---------------------------------------------------------------------------
+_demo_delay: dict = {
+    "saga_commit_seconds": 0,   # sleep inside _advance_saga just before the final commit/abort publish
+    "validation_publish_seconds": 0,  # unused here; mirrored in validation-service
+}
+
+@app.post("/debug/delay")
+def set_demo_delay(saga_commit_seconds: int = 0):
+    """
+    Inject a sleep into the saga coordinator just before it publishes the final
+    APPROVED/REJECTED outcome.  Use this to create a window wide enough to kill
+    the leader container and observe standby election + saga recovery.
+
+    Example:
+        curl -s -X POST "http://localhost:8008/debug/delay?saga_commit_seconds=30"
+    Reset:
+        curl -s -X POST "http://localhost:8008/debug/delay?saga_commit_seconds=0"
+    """
+    _demo_delay["saga_commit_seconds"] = saga_commit_seconds
+    log.warning("[DEMO] saga_commit_delay set to %ds", saga_commit_seconds)
+    return _demo_delay
+
 _geocoder = Nominatim(user_agent="journey-management-tcd")
 
 # Maps the country name returned by Nominatim to the region served by this system.
@@ -698,6 +722,11 @@ def _advance_saga(saga_id: str, region: str, outcome: str, reason: str):
 
         any_rejected = any(o["outcome"] == "REJECTED" for o in outcomes.values())
         producer = _kafka_producer()
+
+        delay = _demo_delay["saga_commit_seconds"]
+        if delay > 0:
+            log.warning("[DEMO] saga_commit_delay: sleeping %ds before final commit/abort — kill the leader now", delay)
+            time.sleep(delay)
 
         if any_rejected:
             ds.update_saga_status(saga_id, "ABORTING")

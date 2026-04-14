@@ -42,6 +42,29 @@ log = logging.getLogger("validation-service")
 
 app = FastAPI(title="Validation Service")
 
+# ---------------------------------------------------------------------------
+# Demo / fault-injection delay — toggled at runtime via POST /debug/delay
+# ---------------------------------------------------------------------------
+_demo_delay: dict = {"validation_seconds": 0}
+
+@app.post("/debug/delay")
+def set_demo_delay(validation_seconds: int = 0):
+    """
+    Inject a sleep inside validate_and_reserve, after locks are acquired and
+    capacity is confirmed available, but before the counters are incremented
+    and the booking is written.  This creates a window to kill the service and
+    observe Kafka re-delivery + dedup behaviour on the surviving instance.
+
+    Example:
+        curl -s -X POST "http://localhost:8005/debug/delay?validation_seconds=30"
+    Reset:
+        curl -s -X POST "http://localhost:8005/debug/delay?validation_seconds=0"
+    """
+    _demo_delay["validation_seconds"] = validation_seconds
+    log.warning("[DEMO] validation_delay set to %ds", validation_seconds)
+    return _demo_delay
+
+
 SERVICE_NAME            = os.getenv("SERVICE_NAME", "validation-service")
 REGION                  = os.getenv("REGION", "local")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
@@ -144,6 +167,11 @@ def validate_and_reserve(segments: list[dict], vehicle_id: str) -> dict:
                 "outcome": "REJECTED",
                 "reason":  f"Vehicle {vehicle_id} already has an active booking",
             }
+
+        delay = _demo_delay["validation_seconds"]
+        if delay > 0:
+            log.warning("[DEMO] validation_delay: locks held, capacity confirmed — sleeping %ds (kill me now)", delay)
+            time.sleep(delay)
 
         for seg in sorted_segs:
             _redis.incr(_cur_key(seg["from"], seg["to"]))
